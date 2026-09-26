@@ -1,0 +1,18 @@
+{
+  "data_dir": "/var/lib/waf",
+  "master_key_file": "/etc/waf/master.key",
+  "http_listen": ":80",
+  "https_listen": ":443",
+  "ops_listen": "127.0.0.1:9090",
+  "admin_domain": "waf-admin.example.com",
+  "admin_cidrs": [],
+  "trusted_proxies": [],
+  "acme_email": "operator@example.com",
+  "development": false,
+  "max_connections": 8192,
+  "max_in_flight": 1024,
+  "body_budget_bytes": 268435456,
+  "max_rate_entries": 100000,
+  "event_retention_days": 7,
+  "event_max_rows": 200000
+}

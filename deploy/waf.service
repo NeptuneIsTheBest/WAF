@@ -1,0 +1,46 @@
+[Unit]
+Description=Go WAF reverse proxy and security console
+Documentation=file:/usr/local/share/waf/docs/OPERATIONS.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=waf
+Group=waf
+StateDirectory=waf
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/waf
+LoadCredential=master.key:/etc/waf/master.key
+ExecStartPre=/usr/local/bin/waf check --config /etc/waf/waf.json
+ExecStart=/usr/local/bin/waf serve --config /etc/waf/waf.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=40
+KillSignal=SIGTERM
+KillMode=mixed
+UMask=0077
+LimitNOFILE=65536
+TasksMax=8192
+MemoryHigh=2500M
+MemoryMax=3G
+Environment=GOMEMLIMIT=2GiB
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/waf
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,23 @@
+groups:
+  - name: waf
+    rules:
+      - alert: WAFDown
+        expr: up{job="waf"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations: {summary: 'WAF metrics endpoint is unavailable'}
+      - alert: WAFCertificateExpiring
+        expr: waf_certificate_min_remaining_seconds < 604800
+        for: 10m
+        labels: {severity: critical}
+        annotations: {summary: 'A configured certificate is missing or expires in under seven days'}
+      - alert: WAFEventLoss
+        expr: increase(waf_log_dropped_total[5m]) > 0 or increase(waf_log_write_errors_total[5m]) > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations: {summary: 'WAF event queue or storage is losing records'}
+      - alert: WAFUpstreamFailures
+        expr: sum(rate(waf_requests_total{action="error"}[5m])) / clamp_min(sum(rate(waf_requests_total[5m])), 1) > 0.01
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: 'More than one percent of WAF requests are failing'}

@@ -1,0 +1,116 @@
+name: ci
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Check publication contents
+        run: python3 scripts/check-publication.py --source
+      - name: Scan credentials
+        run: |
+          curl -fsSL --retry 3 https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o "$RUNNER_TEMP/gitleaks_8.30.1_linux_x64.tar.gz"
+          curl -fsSL --retry 3 https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_checksums.txt -o "$RUNNER_TEMP/gitleaks-checksums.txt"
+          (cd "$RUNNER_TEMP" && sha256sum --check --ignore-missing gitleaks-checksums.txt)
+          tar -xzf "$RUNNER_TEMP/gitleaks_8.30.1_linux_x64.tar.gz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git --redact --no-banner --log-opts=--all .
+      - name: Check installation scripts
+        run: |
+          if ! command -v shellcheck >/dev/null; then sudo apt-get update && sudo apt-get install -y shellcheck; fi
+          make scripts-check
+      - run: make web schema
+      - run: git diff --exit-code -- internal/admin/openapi.json web/dist
+      - run: make test race fuzz check
+      - run: make vuln
+      - run: cd web && npx playwright install --with-deps chromium
+      - run: make e2e
+      - name: Build clean release packages
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            make release VERSION="${GITHUB_REF_NAME#v}"
+          else
+            make release
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          if-no-files-found: error
+          path: |
+            release/*.tar.gz
+            release/SHA256SUMS
+            release/install.sh
+  install:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-24.04-arm]
+        image: ['ubuntu:22.04', 'debian:12']
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+      - name: Build disposable systemd environment
+        run: docker build --build-arg WAF_IMAGE='${{ matrix.image }}' -t waf-install-test .github/systemd
+      - name: Test installation without production DNS credentials
+        run: |
+          docker run -d --name waf-install-test --privileged --cgroupns=host \
+            --tmpfs /run --tmpfs /run/lock --tmpfs /tmp \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" waf-install-test
+          for ((attempt=0; attempt<30; attempt++)); do
+            if docker exec waf-install-test test -d /run/systemd/system; then break; fi
+            sleep 1
+          done
+          docker exec -e CI=true waf-install-test bash /workspace/scripts/systemd-smoke.sh /workspace/release
+      - name: Remove disposable environment
+        if: always()
+        run: docker rm -f waf-install-test || true
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [verify, install]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+      - run: python3 scripts/check-publication.py --release release
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
+          Linux amd64 / arm64 安装包，内置中文管理后台。
+
+          支持 Ubuntu 22.04+ / Debian 12+，使用 systemd 管理服务。
+          下载 install.sh 后执行 sudo bash install.sh，按提示填写域名、邮箱、密码和 Cloudflare Token。
+          保存初始化时显示的 TOTP 密钥及恢复码。
+
+          安装包和安装脚本的 SHA-256 校验值见 SHA256SUMS。
+          NOTES
+          gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/SHA256SUMS release/install.sh \
+            --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md" --latest
