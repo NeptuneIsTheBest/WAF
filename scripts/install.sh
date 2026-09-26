@@ -69,7 +69,9 @@ check_environment() {
   # shellcheck disable=SC1091
   . /etc/os-release
   select_platform "$(uname -s)" "$(uname -m)" "${ID:-}" "${VERSION_ID:-}"
-  command -v systemctl >/dev/null && [[ -d /run/systemd/system ]] || die '需要正在运行的 systemd'
+  if ! command -v systemctl >/dev/null || [[ ! -d /run/systemd/system ]]; then
+    die '需要正在运行的 systemd'
+  fi
   local systemd_version
   systemd_version="$(systemctl --version | awk 'NR == 1 {print $2}')"
   [[ "$systemd_version" =~ ^[0-9]+$ ]] || die '无法读取 systemd 版本'
