@@ -12,8 +12,8 @@ StateDirectory=waf
 StateDirectoryMode=0700
 WorkingDirectory=/var/lib/waf
 LoadCredential=master.key:/etc/waf/master.key
-ExecStartPre=/usr/local/bin/waf check --config /etc/waf/waf.json
-ExecStart=/usr/local/bin/waf serve --config /etc/waf/waf.json
+# systemd 247-250 provides credentials to ExecStart, but not ExecStartPre.
+ExecStart=/bin/sh -ec '/usr/local/bin/waf check --config /etc/waf/waf.json; exec /usr/local/bin/waf serve --config /etc/waf/waf.json'
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=40
