@@ -16,7 +16,18 @@ chmod 0700 "$WAF_SMOKE_DIR"
 cleanup() {
   local status=$?
   trap - EXIT
-  if ((status)); then journalctl -u waf.service -n 60 --no-pager || true; fi
+  if ((status)); then
+    journalctl -u waf.service -n 60 --no-pager || true
+    # Print ownership and access diagnostics only, never credential contents.
+    namei -l /run/credentials/waf.service/master.key || true
+    if [[ -f /etc/waf/master.key ]]; then
+      # shellcheck disable=SC2016
+      systemd-run --unit=waf-credential-probe --wait --pipe \
+        --property=User=waf --property=Group=waf \
+        --property=LoadCredential=master.key:/etc/waf/master.key \
+        /bin/sh -c 'id; namei -l "$CREDENTIALS_DIRECTORY/master.key"; test -r "$CREDENTIALS_DIRECTORY/master.key"' || true
+    fi
+  fi
   systemctl disable --now waf.service 2>/dev/null || true
   rm -f /etc/systemd/system/waf.service /usr/local/bin/waf /run/waf-install.lock
   rm -rf /etc/waf /var/lib/waf /usr/local/share/waf "$WAF_SMOKE_DIR"
