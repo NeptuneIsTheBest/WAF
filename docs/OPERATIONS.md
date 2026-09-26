@@ -9,7 +9,7 @@
 准备管理域名、ACME 邮箱和 Cloudflare Token。Token 需要相应 Zone 的 `DNS:Edit` 与 `Zone:Read` 权限。域名 A/AAAA 记录应指向服务器；只配置服务器实际可用的地址。开放入站 80/443，保持 9090 仅本机可访问，并允许出站 HTTPS 和 DNS。
 
 ```sh
-curl -fsSLo install-waf.sh https://github.com/NeptuneIsTheBest/WAF/releases/latest/download/install.sh
+curl -fsSLo install-waf.sh https://github.com/NeptuneIsTheBest/WAF/releases/latest/download/install.sh &&
 sudo bash install-waf.sh
 ```
 

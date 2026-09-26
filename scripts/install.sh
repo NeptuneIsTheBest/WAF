@@ -258,7 +258,9 @@ main() {
   flock -n 4 || die '另一个 WAF 安装进程正在运行'
   check_existing
   check_ports
-  WAF_TEMP="$(mktemp -d /tmp/waf-install.XXXXXXXX)"
+  # Stage beside the installed executable: /tmp and /var/tmp may be noexec.
+  mkdir -p /usr/local/bin
+  WAF_TEMP="$(mktemp -d /usr/local/bin/.waf-install.XXXXXXXX)"
   trap installer_cleanup EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM

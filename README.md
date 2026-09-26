@@ -17,7 +17,7 @@
 在服务器的 SSH 终端中执行（root 用户可省略 `sudo`）：
 
 ```sh
-curl -fsSLo install-waf.sh https://github.com/NeptuneIsTheBest/WAF/releases/latest/download/install.sh
+curl -fsSLo install-waf.sh https://github.com/NeptuneIsTheBest/WAF/releases/latest/download/install.sh &&
 sudo bash install-waf.sh
 ```
 

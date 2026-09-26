@@ -75,13 +75,15 @@ jobs:
       - name: Test installation without production DNS credentials
         run: |
           docker run -d --name waf-install-test --privileged --cgroupns=host \
-            --tmpfs /run --tmpfs /run/lock --tmpfs /tmp \
+            --tmpfs /run --tmpfs /run/lock --tmpfs /tmp:rw,nosuid,nodev,noexec \
             -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
             -v "$GITHUB_WORKSPACE:/workspace:ro" waf-install-test
-          for ((attempt=0; attempt<30; attempt++)); do
-            if docker exec waf-install-test test -d /run/systemd/system; then break; fi
+          for ((attempt=0; attempt<60; attempt++)); do
+            boot_state="$(docker exec waf-install-test systemctl is-system-running 2>/dev/null || true)"
+            case "$boot_state" in running|degraded) break ;; esac
             sleep 1
           done
+          case "$boot_state" in running|degraded) ;; *) docker logs waf-install-test; exit 1 ;; esac
           docker exec -e CI=true waf-install-test bash /workspace/scripts/systemd-smoke.sh /workspace/release
       - name: Remove disposable environment
         if: always()
