@@ -60,7 +60,7 @@ func array(v any) object { return object{"type": "array", "items": v} }
 func stringType() object { return object{"type": "string"} }
 func numberType() object { return object{"type": "integer", "format": "int64"} }
 func main() {
-	for _, v := range []any{config.Bundle{}, config.Site{}, config.Upstream{}, config.ManagedPolicy{}, config.Exclusion{}, config.CustomRule{}, config.RateLimitPolicy{}, config.RoutePolicy{}, config.BotPolicy{}, store.Draft{}, store.Revision{}, store.User{}, store.Event{}, store.Audit{}, tlsmgr.Status{}, tlsmgr.Credential{}, policy.ManagedRule{}} {
+	for _, v := range []any{config.Bundle{}, config.Site{}, config.Upstream{}, config.ManagedPolicy{}, config.Exclusion{}, config.CustomRule{}, config.RateLimitPolicy{}, config.RoutePolicy{}, config.ChallengeOptions{}, store.Draft{}, store.Revision{}, store.User{}, store.Event{}, store.Audit{}, tlsmgr.Status{}, tlsmgr.Credential{}, policy.ManagedRule{}} {
 		schema(reflect.TypeOf(v))
 	}
 	for name, fields := range map[string][]string{"Bundle": {"sites"}, "Site": {"id", "domains", "upstreams"}, "Upstream": {"url"}, "CustomRule": {"id", "expression", "action"}, "RateLimitPolicy": {"id", "key", "requests_per_second", "burst"}, "RoutePolicy": {"path_prefix"}, "Draft": {"base_revision", "version", "bundle"}} {
@@ -68,7 +68,10 @@ func main() {
 	}
 	props("Site")["id"] = object{"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"}
 	props("ManagedPolicy")["mode"] = object{"type": "string", "enum": []string{"off", "observe", "block"}, "default": "observe"}
-	props("CustomRule")["action"] = object{"type": "string", "enum": []string{"block", "log", "challenge", "skip"}}
+	props("CustomRule")["action"] = object{"type": "string", "enum": []string{"block", "log", "skip", "managed_challenge", "non_interactive_challenge", "interactive_challenge"}}
+	props("ChallengeOptions")["work_factor"] = object{"type": "integer", "minimum": 1000, "maximum": 20000, "default": 5000}
+	props("ChallengeOptions")["clearance_seconds"] = object{"type": "integer", "minimum": 60, "maximum": 86400, "default": 1800}
+	props("CustomRule")["skip"] = object{"type": "array", "items": stringType(), "description": "Explicit targets: custom_rules (remaining rules), rate_limits, managed, rule:<id>, rate:<id>. Protocol and resource limits always apply."}
 	props("CustomRule")["expression"] = object{"type": "string", "maxLength": 4096}
 	props("RoutePolicy")["body_mode"] = object{"type": "string", "enum": []string{"inspect", "stream"}, "default": "inspect"}
 	props("RoutePolicy")["max_body_bytes"] = object{"type": "integer", "minimum": 1, "description": "inspect defaults to 8388608 bytes; stream requires an explicit value; bounded by configured node budget."}

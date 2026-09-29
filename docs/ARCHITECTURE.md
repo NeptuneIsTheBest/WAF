@@ -10,7 +10,7 @@ flowchart LR
   Compile --> Snapshot[原子配置快照]
   Host -->|业务域名| Limits[协议与资源限制]
   Limits --> Custom[自定义规则]
-  Custom --> Rate[限流与 Bot]
+  Custom --> Rate[速率限制规则]
   Rate --> Managed[Coraza / CRS]
   Managed --> Proxy[反向代理]
   Snapshot -.-> Custom
@@ -39,7 +39,11 @@ CEL 只暴露请求元数据和客户端 IP，不提供文件、网络或执行�
 
 正文解析错误在观察模式保留为明确的观察事件，拦截模式拒绝请求。托管引擎运行故障在拦截模式返回 503。规则例外只能修改实际检测规则，不能禁用初始化或异常分数汇总。
 
-浏览器挑战使用 HMAC-SHA256 绑定站点、Host、配置版本、客户端 IP、User-Agent、过期时间和随机 nonce；客户端计算 SHA-256 工作量证明。已使用 nonce 有界保存，容量耗尽时拒绝验证。重启后旧挑战 nonce 的进程随机标记失效。通行 Cookie 有独立签名用途、有限作用域和过期时间，不跳过 CRS 或限流，且不传给上游。
+质询是自定义规则的 Action：`managed_challenge`、`non_interactive_challenge`、`interactive_challenge`。Go SDK 和本地浏览器组件使用 ALTCHA v2 工作量证明协议（浏览器组件为 v3），算法为 PBKDF2/SHA-256。组件、中文资源、CSS 和 Worker 一起嵌入二进制，无外部验证服务。质询入口为 `/.waf/challenge`，`GET /puzzle` 取得题目，`POST /solve` 接收 `{ticket,payload}`，其中 payload 是 ALTCHA 的 base64 JSON 结果。
+
+HMAC-SHA256 票据绑定站点、规则、Host、配置版本、IP、User-Agent、实际验证模式、有效期和 nonce；题目使用每票据独立签名密钥，并嵌入票据摘要及模式。验证前约束所有 KDF 参数，SDK 先验签再核对工作量证明。nonce 原子兑换且有容量限制，重启后的旧票据失效。每个通行作用域独立过期，兑换新规则不会延长或缩短其他作用域的有效期。通行 Cookie 不传给上游，也不会跳过后续规则、限流或 CRS。
+
+Managed 使用站点、规则、IP 和配置版本隔离的令牌桶（每秒 2 个、容量 120）及最近 5 分钟的 3 次验证失败进行模式选择。状态有界，容量耗尽时提高验证要求或拒绝签发。Interactive 要求点击启动计算验证，不声称拥有第三方风险情报或图形识别能力。只有 HTML GET 页面导航在验证后返回原地址，API、SSE、WebSocket 和带正文请求由调用方重试。
 
 账号密码使用 Argon2id（64 MiB、3 次迭代、并行度 2）。会话为随机不透明凭证，数据库只保存 token 的 SHA-256 摘要。TOTP 密钥与 DNS Token 使用 AES-GCM，主密钥不放入数据库或备份归档。
 

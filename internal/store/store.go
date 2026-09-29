@@ -71,6 +71,7 @@ type Event struct {
 	Path           string `json:"path"`
 	Status         int    `json:"status"`
 	Action         string `json:"action"`
+	ChallengeMode  string `json:"challenge_mode,omitempty"`
 	RuleID         string `json:"rule_id,omitempty"`
 	Message        string `json:"message,omitempty"`
 	DurationMS     int64  `json:"duration_ms"`

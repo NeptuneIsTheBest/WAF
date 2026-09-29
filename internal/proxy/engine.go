@@ -384,7 +384,7 @@ func (e *Engine) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 		}
 		event.Bytes = w.bytes
 		event.DurationMS = time.Since(start).Milliseconds()
-		if e.sink != nil {
+		if e.sink != nil && event.Action != "challenge_asset" {
 			e.sink.Record(event)
 		}
 		e.requests.WithLabelValues(event.SiteID, event.Action, strconv.Itoa(event.Status)).Inc()
@@ -429,7 +429,7 @@ func (e *Engine) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 	cfg := site.policy.Config
 	event.SiteID = cfg.ID
 	uriLimit := 8192
-	if r.URL.Path == guard.ChallengePath {
+	if r.URL.Path == guard.ChallengePath || r.URL.Path == guard.ChallengePath+"/puzzle" {
 		uriLimit = 24 << 10
 	}
 	if len(r.URL.RequestURI()) > uriLimit || r.URL.IsAbs() || strings.ContainsAny(r.URL.Path, "\\\x00\r\n") || strings.Contains(r.URL.RawQuery, ";") {
@@ -456,8 +456,8 @@ func (e *Engine) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/.waf/") {
-		e.challenge.Serve(w, r, cfg.ID, event.ClientIP, event.Revision)
-		event.Action = "challenge"
+		result := e.challenge.Serve(w, r, cfg.ID, event.ClientIP, event.Revision)
+		event.Action, event.RuleID, event.ChallengeMode = result.Action, result.RuleID, result.Mode
 		return
 	}
 	route := cfg.Route(config.CanonicalPath(r.URL.Path), r.Method)
@@ -505,18 +505,9 @@ func (e *Engine) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 	r.Header.Del("X-WAF-Inspection")
 	data := policy.RequestData(r, event.ClientIP)
 	skip := map[string]bool{}
-	challenge := func(scope string) bool {
-		if e.challenge.Cleared(r, cfg.ID, scope, event.ClientIP, event.Revision) {
-			return false
-		}
-		event.Action = "challenge"
-		event.RuleID = scope
-		e.challenge.Deny(w, r, cfg.ID, scope, event.ClientIP, event.Revision, cfg.Bot.Difficulty, cfg.Bot.ClearanceSeconds, route.AllowChallenge)
-		return true
-	}
 	for _, rule := range site.policy.Rules {
 		rc := rule.Config
-		if !rc.Enabled || skip["rule:"+rc.ID] {
+		if !rc.Enabled || skip["custom_rules"] || skip["rule:"+rc.ID] {
 			continue
 		}
 		matches, err := rule.Expression.Eval(ctx, data)
@@ -535,11 +526,15 @@ func (e *Engine) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 			return
 		case "log":
 			event.Action = "log"
-		case "challenge":
-			if challenge("rule:" + rc.ID) {
+		case "managed_challenge", "non_interactive_challenge", "interactive_challenge":
+			mode := e.challenge.Mode(cfg.ID, rc.ID, event.ClientIP, rc.Action, event.Revision)
+			if !e.challenge.Cleared(r, cfg.ID, rc.ID, event.ClientIP, event.Revision) {
+				event.Action, event.ChallengeMode = rc.Action, mode
+				e.challenge.Deny(w, r, cfg.ID, rc.ID, event.ClientIP, event.Revision, rc.Action, mode, *rc.Challenge)
 				return
 			}
 		case "skip":
+			event.Action = "skip"
 			for _, target := range rc.Skip {
 				skip[target] = true
 			}
@@ -547,7 +542,7 @@ func (e *Engine) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 	}
 	for _, rate := range site.policy.Rates {
 		rc := rate.Config
-		if !rc.Enabled || skip["rate:"+rc.ID] {
+		if !rc.Enabled || skip["rate_limits"] || skip["rate:"+rc.ID] {
 			continue
 		}
 		matches, err := rate.Expression.Eval(ctx, data)
@@ -570,24 +565,6 @@ func (e *Engine) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Retry-After", strconv.Itoa(max(1, rc.BanSeconds)))
 			deny(429, "rate_limit", "rate_limit")
 			return
-		}
-	}
-	if cfg.Bot.Enabled && !skip["bot"] {
-		suspicious := !e.limits.Allow("bot:"+cfg.ID+":"+event.ClientIP, float64(cfg.Bot.RequestsPerMinute)/60, cfg.Bot.RequestsPerMinute, 0)
-		for _, re := range site.policy.BotPatterns {
-			if re.MatchString(r.UserAgent()) {
-				suspicious = true
-				break
-			}
-		}
-		if suspicious {
-			if cfg.Bot.Action == "block" {
-				deny(403, "block", "bot_policy")
-				return
-			}
-			if challenge("bot") {
-				return
-			}
 		}
 	}
 	var tx types.Transaction

@@ -128,7 +128,6 @@ type Site struct {
 	Rules               []CustomRule      `json:"rules"`
 	RateLimits          []RateLimitPolicy `json:"rate_limits"`
 	Routes              []RoutePolicy     `json:"routes"`
-	Bot                 BotPolicy         `json:"bot"`
 	MaxConnectionsPerIP int               `json:"max_connections_per_ip"`
 	WebSocketOrigins    []string          `json:"websocket_origins"`
 }
@@ -137,6 +136,21 @@ type Upstream struct {
 	Weight     int    `json:"weight"`
 	HealthPath string `json:"health_path"`
 }
+
+// Reject unsupported persisted schemas as well as unsupported API fields.
+// In particular, an old Bot policy must never be silently discarded on startup.
+func (s *Site) UnmarshalJSON(raw []byte) error {
+	type siteData Site
+	var next siteData
+	d := json.NewDecoder(strings.NewReader(string(raw)))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&next); err != nil {
+		return fmt.Errorf("unsupported site configuration: %w", err)
+	}
+	*s = Site(next)
+	return nil
+}
+
 type ManagedPolicy struct {
 	Mode       string      `json:"mode"`
 	Paranoia   int         `json:"paranoia"`
@@ -149,14 +163,28 @@ type Exclusion struct {
 	Target     string `json:"target"`
 }
 type CustomRule struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	Enabled    bool     `json:"enabled"`
-	Priority   int      `json:"priority"`
-	Expression string   `json:"expression"`
-	Action     string   `json:"action"`
-	Skip       []string `json:"skip"`
+	ID         string            `json:"id"`
+	Name       string            `json:"name"`
+	Enabled    bool              `json:"enabled"`
+	Priority   int               `json:"priority"`
+	Expression string            `json:"expression"`
+	Action     string            `json:"action"`
+	Skip       []string          `json:"skip"`
+	Challenge  *ChallengeOptions `json:"challenge,omitempty"`
 }
+type ChallengeOptions struct {
+	WorkFactor       int `json:"work_factor"`
+	ClearanceSeconds int `json:"clearance_seconds"`
+}
+
+func DefaultChallenge() ChallengeOptions {
+	return ChallengeOptions{WorkFactor: 5000, ClearanceSeconds: 1800}
+}
+
+func IsChallengeAction(action string) bool {
+	return action == "managed_challenge" || action == "non_interactive_challenge" || action == "interactive_challenge"
+}
+
 type RateLimitPolicy struct {
 	ID                string  `json:"id"`
 	Name              string  `json:"name"`
@@ -175,22 +203,13 @@ type RoutePolicy struct {
 	IdleTimeoutSeconds int      `json:"idle_timeout_seconds"`
 	MaxDurationSeconds int      `json:"max_duration_seconds"`
 	MaxConcurrent      int      `json:"max_concurrent"`
-	AllowChallenge     bool     `json:"allow_challenge"`
-}
-type BotPolicy struct {
-	Enabled           bool     `json:"enabled"`
-	UserAgentPatterns []string `json:"user_agent_patterns"`
-	RequestsPerMinute int      `json:"requests_per_minute"`
-	Action            string   `json:"action"`
-	Difficulty        int      `json:"difficulty"`
-	ClearanceSeconds  int      `json:"clearance_seconds"`
 }
 
 func DefaultRoute() RoutePolicy {
 	return RoutePolicy{PathPrefix: "/", BodyMode: "inspect", MaxBodyBytes: 8 * MiB, IdleTimeoutSeconds: 300, MaxConcurrent: 256}
 }
 func DefaultSite() Site {
-	return Site{Enabled: true, HTTPS: true, RedirectHTTP: true, DNSCredential: "cloudflare", Managed: ManagedPolicy{Mode: "observe", Paranoia: 1, Threshold: 5}, Routes: []RoutePolicy{DefaultRoute()}, MaxConnectionsPerIP: 32, Bot: BotPolicy{Action: "challenge", Difficulty: 16, ClearanceSeconds: 1800, RequestsPerMinute: 120}}
+	return Site{Enabled: true, HTTPS: true, RedirectHTTP: true, DNSCredential: "cloudflare", Managed: ManagedPolicy{Mode: "observe", Paranoia: 1, Threshold: 5}, Routes: []RoutePolicy{DefaultRoute()}, MaxConnectionsPerIP: 32}
 }
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -331,9 +350,19 @@ func (b *Bundle) NormalizeAndValidate(boot Bootstrap) error {
 		}
 		rids := map[string]bool{}
 		challenges := 0
-		for _, r := range s.Rules {
-			if r.Action == "challenge" {
+		for j := range s.Rules {
+			r := &s.Rules[j]
+			if IsChallengeAction(r.Action) {
 				challenges++
+				if r.Challenge == nil {
+					options := DefaultChallenge()
+					r.Challenge = &options
+				}
+				if r.Challenge.WorkFactor < 1000 || r.Challenge.WorkFactor > 20000 || r.Challenge.ClearanceSeconds < 60 || r.Challenge.ClearanceSeconds > 86400 {
+					return errors.New("invalid challenge options")
+				}
+			} else if r.Challenge != nil {
+				return errors.New("challenge options require a challenge action")
 			}
 			if challenges > 16 {
 				return errors.New("at most 16 challenge rules per site are supported")
@@ -342,7 +371,7 @@ func (b *Bundle) NormalizeAndValidate(boot Bootstrap) error {
 				return errors.New("invalid custom rule")
 			}
 			rids[r.ID] = true
-			if r.Action != "block" && r.Action != "log" && r.Action != "challenge" && r.Action != "skip" {
+			if r.Action != "block" && r.Action != "log" && !IsChallengeAction(r.Action) && r.Action != "skip" {
 				return errors.New("invalid rule action")
 			}
 			if r.Action == "skip" && len(r.Skip) == 0 {
@@ -361,7 +390,7 @@ func (b *Bundle) NormalizeAndValidate(boot Bootstrap) error {
 		}
 		for _, r := range s.Rules {
 			for _, k := range r.Skip {
-				if k != "managed" && k != "bot" && !strings.HasPrefix(k, "rate:") && !strings.HasPrefix(k, "rule:") {
+				if k != "managed" && k != "custom_rules" && k != "rate_limits" && !strings.HasPrefix(k, "rate:") && !strings.HasPrefix(k, "rule:") {
 					return errors.New("invalid skip target")
 				}
 				if strings.HasPrefix(k, "rate:") && !rateIDs[strings.TrimPrefix(k, "rate:")] {
@@ -427,33 +456,7 @@ func (b *Bundle) NormalizeAndValidate(boot Bootstrap) error {
 				return errors.New("invalid WebSocket origin")
 			}
 		}
-		bot := &s.Bot
-		if bot.Action == "" {
-			bot.Action = "challenge"
-		}
-		if bot.Difficulty == 0 {
-			bot.Difficulty = 16
-		}
-		if bot.ClearanceSeconds == 0 {
-			bot.ClearanceSeconds = 1800
-		}
-		if bot.RequestsPerMinute == 0 {
-			bot.RequestsPerMinute = 120
-		}
-		if bot.Action != "block" && bot.Action != "challenge" || bot.Difficulty < 8 || bot.Difficulty > 22 || bot.ClearanceSeconds < 60 || bot.ClearanceSeconds > 86400 || bot.RequestsPerMinute < 1 {
-			return errors.New("invalid bot policy")
-		}
-		if len(bot.UserAgentPatterns) > 32 {
-			return errors.New("too many bot patterns")
-		}
-		for _, p := range bot.UserAgentPatterns {
-			if len(p) > 256 {
-				return errors.New("bot pattern too long")
-			}
-			if _, e := regexp.Compile(p); e != nil {
-				return e
-			}
-		}
+
 	}
 	return nil
 }

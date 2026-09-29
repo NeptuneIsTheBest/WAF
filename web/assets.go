@@ -11,6 +11,35 @@ import (
 //go:embed dist
 var assets embed.FS
 
+// ServeChallengeAsset serves only the separate public verification bundle.
+// Missing assets never fall back to the administration application's HTML.
+func ServeChallengeAsset(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != "GET" && r.Method != "HEAD" {
+		http.Error(w, "method not allowed", 405)
+		return false
+	}
+	name := strings.TrimPrefix(r.URL.Path, "/.waf/challenge/assets/")
+	if name == "" || path.Clean(name) != name || strings.HasPrefix(name, "/") || strings.Contains(name, "..") {
+		http.NotFound(w, r)
+		return false
+	}
+	root, err := fs.Sub(assets, "dist/challenge")
+	if err != nil {
+		http.NotFound(w, r)
+		return false
+	}
+	info, err := fs.Stat(root, name)
+	if err != nil || info.IsDir() {
+		http.NotFound(w, r)
+		return false
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	copy := r.Clone(r.Context())
+	copy.URL.Path = "/" + name
+	http.FileServer(http.FS(root)).ServeHTTP(w, copy)
+	return true
+}
+
 func Handler() http.Handler {
 	root, _ := fs.Sub(assets, "dist")
 	files := http.FileServer(http.FS(root))

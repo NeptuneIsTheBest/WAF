@@ -100,11 +100,10 @@ type CompiledRate struct {
 	Expression *Expression
 }
 type Site struct {
-	Config      config.Site
-	Rules       []CompiledRule
-	Rates       []CompiledRate
-	BotPatterns []*regexp.Regexp
-	Managed     map[string]coraza.WAF
+	Config  config.Site
+	Rules   []CompiledRule
+	Rates   []CompiledRate
+	Managed map[string]coraza.WAF
 }
 type Compiled struct {
 	Sites []*Site
@@ -143,13 +142,6 @@ func Compile(bundle config.Bundle, boot config.Bootstrap) (out *Compiled, err er
 				return out, fmt.Errorf("site %s rate %s: %w", cfg.ID, rate.ID, e)
 			}
 			s.Rates = append(s.Rates, CompiledRate{Config: rate, Expression: p})
-		}
-		for _, pat := range cfg.Bot.UserAgentPatterns {
-			p, e := regexp.Compile(pat)
-			if e != nil {
-				return out, e
-			}
-			s.BotPatterns = append(s.BotPatterns, p)
 		}
 		for _, x := range cfg.Managed.Exclusions {
 			if !catalogIDs[x.RuleID] {

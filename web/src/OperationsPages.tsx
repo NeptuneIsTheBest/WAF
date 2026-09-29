@@ -21,12 +21,10 @@ import {
   message,
 } from "antd";
 import {
-  CheckCircleOutlined,
   CloudDownloadOutlined,
   CloudUploadOutlined,
   PlusOutlined,
   ReloadOutlined,
-  WarningOutlined,
 } from "@ant-design/icons";
 import { actionColor, actionNames, api, timestamp } from "./api";
 import type {
@@ -38,7 +36,7 @@ import type {
   Site,
   User,
 } from "./types";
-const { Text, Paragraph, Title } = Typography;
+const { Text, Paragraph } = Typography;
 export function OverviewPage({
   sites,
   refresh,
@@ -51,7 +49,10 @@ export function OverviewPage({
   useEffect(() => {
     const load = () =>
       api<Overview>("/overview")
-        .then(setData)
+        .then((value) => {
+          setData(value);
+          setError("");
+        })
         .catch((e) => setError(e.message));
     void load();
     const t = setInterval(load, 15000);
@@ -66,42 +67,36 @@ export function OverviewPage({
   const active = sites.filter((s) => s.enabled);
   const observe = active.filter((s) => s.managed.mode === "observe");
   return (
-    <Space orientation="vertical" size={22} className="full-width">
+    <Space orientation="vertical" size={16} className="full-width">
       {error && <Alert type="error" title={error} />}
-      <div className="overview-hero">
-        <div>
-          <div className="eyebrow">APPLICATION SECURITY</div>
-          <Title level={2}>流量安全，一目了然</Title>
-          <Paragraph>查看当前防护状态、请求事件与服务健康情况。</Paragraph>
-          <Space>
-            <Tag color="cyan">OWASP CRS {data?.crs_version || "—"}</Tag>
-            <Tag>配置版本 {data?.revision || 0}</Tag>
-          </Space>
-        </div>
-        <div className="hero-status">
-          <CheckCircleOutlined aria-hidden="true" />
-          <span>防护控制台</span>
-          <small>{active.length} 个启用站点</small>
-        </div>
+      <div className="overview-meta">
+        <Space size={16} wrap>
+          <Text type="secondary">当前配置 v{data?.revision ?? "—"}</Text>
+          <Text type="secondary">OWASP CRS {data?.crs_version || "—"}</Text>
+        </Space>
+        <Text type="secondary">请求统计：最近 24 小时</Text>
       </div>
-      <Row gutter={[20, 20]}>
+      <Row gutter={[16, 16]}>
         {[
           {
-            title: "已记录请求 · 24h",
+            title: "已记录请求",
             value: total,
-            note: "受日志留存与容量上限影响",
+            note: "受日志保留和容量限制",
           },
           {
             title: "拦截与限流",
             value: blocked,
             note: total
               ? `${((blocked / total) * 100).toFixed(1)}% 的已记录请求`
-              : "等待请求事件",
+              : "暂无请求记录",
           },
           {
             title: "浏览器挑战",
-            value: stats.challenge || 0,
-            note: "本地工作量证明",
+            value:
+              (stats.managed_challenge || 0) +
+              (stats.non_interactive_challenge || 0) +
+              (stats.interactive_challenge || 0),
+            note: "要求浏览器验证的请求",
           },
           {
             title: "启用站点",
@@ -109,8 +104,8 @@ export function OverviewPage({
             note: `${observe.length} 个站点处于观察模式`,
           },
         ].map((x) => (
-          <Col xs={24} sm={12} xl={6} key={x.title}>
-            <Card className="stat-card">
+          <Col xs={12} xl={6} key={x.title}>
+            <Card className="stat-card" loading={!data && !error}>
               <Statistic title={x.title} value={x.value} />
               <Text type="secondary">{x.note}</Text>
             </Card>
@@ -121,28 +116,30 @@ export function OverviewPage({
         <Alert
           showIcon
           type="warning"
-          title={`${observe.length} 个站点尚处于托管规则观察模式`}
-          description="观察模式记录命中，不执行托管规则拦截。完成误报调优后，可切换为拦截模式并发布。"
+          title={`${observe.length} 个站点处于观察模式`}
+          description="托管规则只记录命中，不拦截请求。确认无误报后，可切换为拦截模式并发布。"
         />
       )}
       {((stats.log_dropped || 0) > 0 || (stats.log_write_errors || 0) > 0) && (
         <Alert
           showIcon
           type="error"
-          title="日志存在丢弃或存储错误"
+          title="部分日志未能保存"
           description={`丢弃 ${stats.log_dropped || 0} 条，写入失败 ${stats.log_write_errors || 0} 次。请检查磁盘与日志负载。`}
         />
       )}
-      <Row gutter={[20, 20]}>
+      <Row gutter={[16, 16]}>
         <Col xs={24} xl={14}>
           <Card
-            title="上游服务健康"
+            title="上游状态"
             extra={<Tag>{data?.upstreams.length || 0} 个上游</Tag>}
           >
             <Table
               rowKey={(r) => r.site_id + r.url}
               dataSource={data?.upstreams || []}
               pagination={false}
+              scroll={{ x: 500 }}
+              locale={{ emptyText: "暂无已发布的上游" }}
               columns={[
                 { title: "站点", dataIndex: "site_id" },
                 { title: "地址", dataIndex: "url", ellipsis: true },
@@ -163,13 +160,15 @@ export function OverviewPage({
           </Card>
         </Col>
         <Col xs={24} xl={10}>
-          <Card title="防护分布">
+          <Card title="请求处理结果">
             <div className="distribution">
               {[
                 "allow",
                 "block",
                 "observe",
-                "challenge",
+                "managed_challenge",
+                "non_interactive_challenge",
+                "interactive_challenge",
                 "rate_limit",
                 "error",
               ].map((k) => (
@@ -187,7 +186,7 @@ export function OverviewPage({
               ))}
             </div>
             <Paragraph type="secondary" className="form-top">
-              这里展示已落盘事件；实时完整计数见本机 Prometheus 指标。
+              仅统计已保存的事件。完整计数见 Prometheus 指标。
             </Paragraph>
           </Card>
         </Col>
@@ -309,14 +308,14 @@ export function CertificatesPage({ admin }: { admin: boolean }) {
           }
         >
           <Paragraph type="secondary">
-            使用 API Token。授予 Zone 查询与目标 Zone 的 DNS
-            编辑权限；也可分别配置 Zone:Read Token 和 DNS 编辑
-            Token。凭据保存后不会回显。
+            Token 需要目标 Zone 的 DNS:Edit 和 Zone:Read
+            权限，也可分别填写。保存后不再显示 Token。
           </Paragraph>
           <Table
             rowKey="name"
             dataSource={credentials}
             pagination={false}
+            scroll={{ x: 500 }}
             columns={[
               { title: "名称", dataIndex: "name" },
               { title: "更新时间", dataIndex: "updated", render: timestamp },
@@ -331,7 +330,7 @@ export function CertificatesPage({ admin }: { admin: boolean }) {
                       setOpen(true);
                     }}
                   >
-                    轮换 Token
+                    更新 Token
                   </Button>
                 ),
               },
@@ -345,7 +344,7 @@ export function CertificatesPage({ admin }: { admin: boolean }) {
         onCancel={() => setOpen(false)}
         onOk={() => void save()}
         confirmLoading={saving}
-        okText="加密保存"
+        okText="保存"
       >
         <Form form={form} layout="vertical">
           <Form.Item
@@ -406,9 +405,9 @@ export function EventsPage({
   return (
     <>
       <Card
-        title="请求与安全事件"
+        title="事件记录"
         extra={
-          <Space wrap>
+          <div className="filter-bar">
             <Select
               allowClear
               placeholder="全部站点"
@@ -450,7 +449,7 @@ export function EventsPage({
             >
               刷新
             </Button>
-          </Space>
+          </div>
         }
       >
         <Table
@@ -484,7 +483,7 @@ export function EventsPage({
                   {actionNames[e.action] || e.action}
                 </Tag>
               ),
-              width: 115,
+              width: 210,
             },
             { title: "状态", dataIndex: "status", width: 60 },
             { title: "规则", dataIndex: "rule_id", width: 85 },
@@ -542,7 +541,7 @@ export function EventsPage({
                   setDetail(null);
                 }}
               >
-                建立规则例外
+                添加规则例外
               </Button>
             </Space>
           ) : (
@@ -575,6 +574,19 @@ export function EventsPage({
                   label: "动作",
                   children: actionNames[detail.action],
                 },
+                ...(detail.challenge_mode
+                  ? [
+                      {
+                        key: "challenge_mode",
+                        label: "实际验证方式",
+                        children:
+                          detail.challenge_mode === "interactive"
+                            ? "点击验证"
+                            : "自动验证",
+                        span: 2,
+                      },
+                    ]
+                  : []),
                 { key: "path", label: "路径", children: detail.path, span: 2 },
                 {
                   key: "rule",
@@ -601,14 +613,14 @@ export function EventsPage({
               ]}
             />
             <Paragraph type="secondary" className="form-top">
-              事件不记录请求正文、Cookie、Authorization 或查询参数值。WebSocket
-              消息内容不检查。
+              事件不保存请求正文、Cookie、Authorization 和查询参数值；不检查
+              WebSocket 消息内容。
             </Paragraph>
           </>
         )}
       </Modal>
       <Modal
-        title={`为规则 ${exception?.rule_id || ""} 建立例外`}
+        title={`为规则 ${exception?.rule_id || ""} 添加例外`}
         open={!!exception}
         onCancel={() => setException(null)}
         onOk={async () => {
@@ -622,8 +634,8 @@ export function EventsPage({
         <Alert
           type="warning"
           showIcon
-          title="确认作用范围后再发布"
-          description="例外使用路径前缀匹配；可以进一步限定参数，减少跳过范围。"
+          title="检查例外范围后再发布"
+          description="例外按路径前缀匹配，填写参数可缩小跳过范围。"
         />
         <Form form={form} layout="vertical" className="form-top">
           <Form.Item name="path_prefix" label="路径前缀">
@@ -700,13 +712,14 @@ export function UsersPage() {
         <Alert
           type="info"
           showIcon
-          title="公网后台要求密码与 TOTP"
+          title="角色权限"
           description="管理员管理账号与凭据；操作员管理站点和规则；只读用户查看状态与事件。"
         />
         <Table
           rowKey="id"
           dataSource={users}
           pagination={false}
+          scroll={{ x: 650 }}
           className="form-top"
           columns={[
             { title: "用户名", dataIndex: "username" },
@@ -786,12 +799,12 @@ export function UsersPage() {
         </Form>
       </Modal>
       <Modal
-        title="保存双因素认证资料"
+        title="保存登录验证信息"
         open={!!enrollment}
         onCancel={() => setEnrollment(undefined)}
         footer={
           <Button type="primary" onClick={() => setEnrollment(undefined)}>
-            已安全保存
+            已保存
           </Button>
         }
         width={650}
@@ -800,13 +813,13 @@ export function UsersPage() {
           <>
             <Alert
               type="warning"
-              title="这些资料仅展示一次，请通过安全渠道交给该用户。"
+              title="验证信息只显示一次，请保存后通过安全渠道交给用户。"
             />
             <Row gutter={24} className="form-top">
-              <Col span={10}>
+              <Col xs={24} md={10}>
                 <QRCode value={enrollment.otpauth_url} />
               </Col>
-              <Col span={14}>
+              <Col xs={24} md={14}>
                 <Text strong>{enrollment.user.username}</Text>
                 <Paragraph copyable>{enrollment.totp_secret}</Paragraph>
                 <Text strong>一次性恢复码</Text>
@@ -850,6 +863,7 @@ export function AuditPage() {
         rowKey="id"
         dataSource={rows}
         pagination={false}
+        scroll={{ x: 600 }}
         columns={[
           { title: "时间", dataIndex: "time", render: timestamp },
           { title: "操作者", dataIndex: "actor" },
@@ -887,13 +901,14 @@ export function RevisionsPage({
       <Alert
         type="info"
         showIcon
-        title="配置回滚会生成一个新版本"
-        description="回滚前重新校验当前 CRS。规则集本身随软件版本发布，配置回滚不会降级规则集或恢复旧通行凭证。"
+        title="回滚将创建并发布新版本"
+        description="回滚会替换当前草稿，并使用当前 CRS 校验。规则集不会降级，旧通行凭证不会恢复。"
       />
       <Table
         rowKey="id"
         dataSource={rows}
         pagination={{ pageSize: 20 }}
+        scroll={{ x: 600 }}
         className="form-top"
         columns={[
           {
@@ -956,8 +971,8 @@ export function BackupsPage() {
       <Alert
         type="warning"
         showIcon
-        title="主密钥需要单独备份"
-        description="备份使用独立密码进行 age 加密，包含配置、账号、事件与证书。恢复还需要原始 master.key。请下载后存放到其他机器。"
+        title="请同时备份 master.key"
+        description="备份包含配置、账号、事件和证书，使用独立密码加密。恢复还需要原始 master.key，请将两者保存到其他机器。"
       />
       <Card
         title="加密备份"
@@ -978,6 +993,7 @@ export function BackupsPage() {
           rowKey="name"
           dataSource={rows}
           pagination={false}
+          scroll={{ x: 550 }}
           columns={[
             { title: "文件", dataIndex: "name" },
             { title: "创建时间", dataIndex: "created", render: timestamp },
@@ -1002,7 +1018,7 @@ export function BackupsPage() {
       </Card>
       <Card title="恢复与运行诊断">
         <Paragraph>
-          恢复在服务停止后通过本机 CLI 执行，旧数据会保留为恢复前副本。
+          先停止服务，再在服务器上执行恢复命令。恢复前的旧数据会另存为副本。
         </Paragraph>
         <pre className="command-block">
           {

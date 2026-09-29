@@ -392,3 +392,80 @@ func TestManagedExceptionScopeAndObserve(t *testing.T) {
 		t.Fatalf("observe blocked request: %d", resp.StatusCode)
 	}
 }
+
+func TestSecurityActionExecution(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "origin") }))
+	defer origin.Close()
+	for _, action := range []string{"block", "log", "managed_challenge", "non_interactive_challenge", "interactive_challenge"} {
+		t.Run(action, func(t *testing.T) {
+			_, srv := testEngine(t, origin.URL, func(s *config.Site) {
+				s.Managed.Mode = "off"
+				s.Rules = []config.CustomRule{{ID: "rule", Enabled: true, Expression: "true", Action: action}}
+			})
+			resp := request(t, srv, "GET", "/protected", nil)
+			defer resp.Body.Close()
+			raw, _ := io.ReadAll(resp.Body)
+			if action == "log" {
+				if resp.StatusCode != 200 {
+					t.Fatalf("log interrupted request: %s", raw)
+				}
+				return
+			}
+			if resp.StatusCode != 403 {
+				t.Fatalf("expected denial: %d %s", resp.StatusCode, raw)
+			}
+			if config.IsChallengeAction(action) {
+				var response map[string]string
+				json.Unmarshal(raw, &response)
+				mode := "non_interactive"
+				if action == "interactive_challenge" {
+					mode = "interactive"
+				}
+				if response["action"] != action || response["challenge_mode"] != mode || response["challenge_url"] == "" {
+					t.Fatalf("wrong challenge: %s", raw)
+				}
+			}
+		})
+	}
+}
+func TestSkipPhasesAndResourceLimits(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "origin") }))
+	defer origin.Close()
+	_, srv := testEngine(t, origin.URL, func(s *config.Site) {
+		s.Rules = []config.CustomRule{
+			{ID: "skip-custom", Enabled: true, Priority: 1, Expression: `request.path == "/custom"`, Action: "skip", Skip: []string{"custom_rules"}},
+			{ID: "skip-one", Enabled: true, Priority: 1, Expression: `request.path == "/one"`, Action: "skip", Skip: []string{"rule:blocked"}},
+			{ID: "skip-rates", Enabled: true, Priority: 1, Expression: `request.path == "/rates"`, Action: "skip", Skip: []string{"rate_limits"}},
+			{ID: "skip-rate", Enabled: true, Priority: 1, Expression: `request.path == "/rate"`, Action: "skip", Skip: []string{"rate:limit"}},
+			{ID: "skip-managed", Enabled: true, Priority: 1, Expression: `request.path == "/managed"`, Action: "skip", Skip: []string{"managed"}},
+			{ID: "skip-bypass", Enabled: true, Priority: 1, Expression: `request.path == "/bypass"`, Action: "skip", Skip: []string{"custom_rules", "rate_limits", "managed"}},
+			{ID: "blocked", Enabled: true, Priority: 2, Expression: `request.path in ["/custom", "/one", "/blocked"]`, Action: "block"},
+		}
+		s.RateLimits = []config.RateLimitPolicy{{ID: "limit", Enabled: true, Expression: `request.path in ["/rates", "/rate", "/limited"]`, Key: "ip_path", RequestsPerSecond: 0.001, Burst: 1}}
+		s.Routes[0].MaxBodyBytes = 1024
+	})
+	for _, path := range []string{"/custom", "/one", "/rates", "/rate"} {
+		for i := 0; i < 2; i++ {
+			r := request(t, srv, "GET", path, nil)
+			r.Body.Close()
+			if r.StatusCode != 200 {
+				t.Fatalf("skip %s: %d", path, r.StatusCode)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		path string
+		want int
+	}{{"/blocked", 403}, {"/limited", 200}, {"/limited", 429}, {"/managed?q=" + url.QueryEscape("<script>alert(1)</script>"), 200}, {"/?q=" + url.QueryEscape("<script>alert(1)</script>"), 403}} {
+		r := request(t, srv, "GET", tc.path, nil)
+		r.Body.Close()
+		if r.StatusCode != tc.want {
+			t.Fatalf("%s: %d != %d", tc.path, r.StatusCode, tc.want)
+		}
+	}
+	r := request(t, srv, "POST", "/bypass", strings.NewReader(strings.Repeat("x", 1025)))
+	r.Body.Close()
+	if r.StatusCode != 413 {
+		t.Fatal("Skip bypassed resource limit")
+	}
+}

@@ -58,39 +58,6 @@
         ],
         "type": "object"
       },
-      "BotPolicy": {
-        "additionalProperties": false,
-        "properties": {
-          "action": {
-            "type": "string"
-          },
-          "clearance_seconds": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "difficulty": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "enabled": {
-            "type": "boolean"
-          },
-          "requests_per_minute": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "user_agent_patterns": {
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          }
-        },
-        "type": "object"
-      },
       "Bundle": {
         "additionalProperties": false,
         "properties": {
@@ -107,6 +74,24 @@
         "required": [
           "sites"
         ],
+        "type": "object"
+      },
+      "ChallengeOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "clearance_seconds": {
+            "default": 1800,
+            "maximum": 86400,
+            "minimum": 60,
+            "type": "integer"
+          },
+          "work_factor": {
+            "default": 5000,
+            "maximum": 20000,
+            "minimum": 1000,
+            "type": "integer"
+          }
+        },
         "type": "object"
       },
       "CreateUser": {
@@ -161,10 +146,15 @@
             "enum": [
               "block",
               "log",
-              "challenge",
-              "skip"
+              "skip",
+              "managed_challenge",
+              "non_interactive_challenge",
+              "interactive_challenge"
             ],
             "type": "string"
+          },
+          "challenge": {
+            "$ref": "#/components/schemas/ChallengeOptions"
           },
           "enabled": {
             "type": "boolean"
@@ -184,13 +174,11 @@
             "type": "integer"
           },
           "skip": {
+            "description": "Explicit targets: custom_rules (remaining rules), rate_limits, managed, rule:\u003cid\u003e, rate:\u003cid\u003e. Protocol and resource limits always apply.",
             "items": {
               "type": "string"
             },
-            "type": [
-              "array",
-              "null"
-            ]
+            "type": "array"
           }
         },
         "required": [
@@ -303,6 +291,9 @@
           "bytes": {
             "format": "int64",
             "type": "integer"
+          },
+          "challenge_mode": {
+            "type": "string"
           },
           "client_ip": {
             "type": "string"
@@ -641,9 +632,6 @@
       "RoutePolicy": {
         "additionalProperties": false,
         "properties": {
-          "allow_challenge": {
-            "type": "boolean"
-          },
           "body_mode": {
             "default": "inspect",
             "enum": [
@@ -716,9 +704,6 @@
       "Site": {
         "additionalProperties": false,
         "properties": {
-          "bot": {
-            "$ref": "#/components/schemas/BotPolicy"
-          },
           "dns_credential": {
             "type": "string"
           },

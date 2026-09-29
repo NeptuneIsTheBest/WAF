@@ -21,13 +21,35 @@ export interface Exclusion {
   path_prefix: string;
   target: string;
 }
+export type RuleAction =
+  | "block"
+  | "skip"
+  | "log"
+  | "managed_challenge"
+  | "non_interactive_challenge"
+  | "interactive_challenge";
+export interface ChallengeOptions {
+  work_factor: number;
+  clearance_seconds: number;
+}
+export const defaultChallenge = (): ChallengeOptions => ({
+  work_factor: 5000,
+  clearance_seconds: 1800,
+});
+export const isChallengeAction = (action: string) =>
+  [
+    "managed_challenge",
+    "non_interactive_challenge",
+    "interactive_challenge",
+  ].includes(action);
 export interface CustomRule {
   id: string;
   name: string;
   enabled: boolean;
   priority: number;
   expression: string;
-  action: "block" | "log" | "challenge" | "skip";
+  action: RuleAction;
+  challenge?: ChallengeOptions;
   skip: string[];
 }
 export interface RateLimit {
@@ -48,15 +70,6 @@ export interface RoutePolicy {
   idle_timeout_seconds: number;
   max_duration_seconds: number;
   max_concurrent: number;
-  allow_challenge: boolean;
-}
-export interface BotPolicy {
-  enabled: boolean;
-  user_agent_patterns: string[];
-  requests_per_minute: number;
-  action: "block" | "challenge";
-  difficulty: number;
-  clearance_seconds: number;
 }
 export interface Site {
   id: string;
@@ -76,7 +89,6 @@ export interface Site {
   rules: CustomRule[];
   rate_limits: RateLimit[];
   routes: RoutePolicy[];
-  bot: BotPolicy;
   max_connections_per_ip: number;
   websocket_origins: string[];
 }
@@ -123,6 +135,7 @@ export interface SecurityEvent {
   status: number;
   action: string;
   rule_id?: string;
+  challenge_mode?: "non_interactive" | "interactive";
   message?: string;
   duration_ms: number;
   bytes: number;
@@ -157,7 +170,6 @@ export const defaultRoute = (): RoutePolicy => ({
   idle_timeout_seconds: 300,
   max_duration_seconds: 0,
   max_concurrent: 256,
-  allow_challenge: false,
 });
 export const defaultSite = (): Site => ({
   id: "",
@@ -172,14 +184,6 @@ export const defaultSite = (): Site => ({
   rules: [],
   rate_limits: [],
   routes: [defaultRoute()],
-  bot: {
-    enabled: false,
-    user_agent_patterns: [],
-    requests_per_minute: 120,
-    action: "challenge",
-    difficulty: 16,
-    clearance_seconds: 1800,
-  },
   max_connections_per_ip: 32,
   websocket_origins: [],
 });
@@ -191,6 +195,5 @@ export function normalizeSite(s: Site): Site {
     routes: s.routes || [],
     websocket_origins: s.websocket_origins || [],
     managed: { ...s.managed, exclusions: s.managed.exclusions || [] },
-    bot: { ...s.bot, user_agent_patterns: s.bot.user_agent_patterns || [] },
   };
 }

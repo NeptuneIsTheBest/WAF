@@ -1,6 +1,15 @@
 import { test, expect } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import type { Draft, Session } from "../src/types";
 import { defaultSite } from "../src/types";
+
+async function expectPageFits(page: Page) {
+  await expect
+    .poll(() =>
+      page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+    )
+    .toBe(true);
+}
 
 test("console publishes policies, blocks traffic, records events and enforces RBAC", async ({
   page,
@@ -11,8 +20,10 @@ test("console publishes policies, blocks traffic, records events and enforces RB
   await page.goto("/");
   await page.getByLabel("用户名", { exact: true }).fill("admin");
   await page.getByLabel("密码", { exact: true }).fill("browser-test-password");
-  await page.getByRole("button", { name: "安全登录" }).click();
-  await expect(page.getByText("流量安全，一目了然")).toBeVisible();
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "安全概览", exact: true }),
+  ).toBeVisible();
   await page.getByRole("menuitem", { name: "站点管理" }).click();
   await page.getByRole("button", { name: "添加站点" }).click();
   const siteDialog = page.getByRole("dialog");
@@ -35,8 +46,8 @@ test("console publishes policies, blocks traffic, records events and enforces RB
     headers: { Host: "site.localhost" },
   });
   expect(allowed.status()).toBe(200);
-  await page.getByRole("menuitem", { name: "自定义规则" }).click();
-  await page.getByRole("button", { name: "添加规则" }).click();
+  await page.getByRole("menuitem", { name: "安全规则" }).click();
+  await page.getByRole("button", { name: "添加自定义规则" }).click();
   const ruleDialog = page.getByRole("dialog");
   await ruleDialog
     .getByLabel("规则标识", { exact: true })
@@ -74,12 +85,19 @@ test("console publishes policies, blocks traffic, records events and enforces RB
     .getByLabel("初始密码", { exact: true })
     .fill("reader-test-password");
   await userDialog.getByRole("button", { name: "确定", exact: true }).click();
-  await expect(page.getByText("保存双因素认证资料")).toBeVisible();
-  await page.getByRole("button", { name: "已安全保存" }).click();
+  await expect(page.getByText("保存登录验证信息")).toBeVisible();
+  await page.getByRole("button", { name: "已保存", exact: true }).click();
   await page.getByRole("menuitem", { name: "安全概览" }).click();
+  await expect(
+    page.getByText("配置版本 2 已发布", { exact: true }),
+  ).not.toBeVisible();
+  await expect(page.getByText("当前配置 v2", { exact: true })).toBeVisible();
+  await page.mouse.move(1000, 0);
   await page.screenshot({ path: "test-results/overview.png", fullPage: true });
-  await page.setViewportSize({ width: 420, height: 900 });
-  await expect(page.locator(".sidebar")).toHaveCSS("width", "80px");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("button", { name: "打开导航" })).toBeVisible();
+  await expect(page.locator(".sidebar")).toHaveCount(0);
+  await expectPageFits(page);
   await page.screenshot({ path: "test-results/mobile.png", fullPage: true });
   const session = await (
     await context.request.get("/api/v1/auth/session")
@@ -94,13 +112,117 @@ test("console publishes policies, blocks traffic, records events and enforces RB
   await page.reload();
   await page.getByLabel("用户名", { exact: true }).fill("reader");
   await page.getByLabel("密码", { exact: true }).fill("reader-test-password");
-  await page.getByRole("button", { name: "安全登录" }).click();
-  await expect(page.getByText("流量安全，一目了然")).toBeVisible();
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "安全概览", exact: true }),
+  ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "发布配置", exact: true }),
   ).toHaveCount(0);
   expect((await context.request.get("/api/v1/credentials")).status()).toBe(403);
+  await page.getByRole("button", { name: "打开导航" }).click();
+  const readerNavigation = page.getByRole("dialog", { name: "WAF 控制台" });
+  await expect(readerNavigation).toBeVisible();
+  await expect(
+    readerNavigation.getByRole("menuitem", { name: "用户与权限" }),
+  ).toHaveCount(0);
+  await expect(
+    readerNavigation.getByRole("menuitem", { name: "备份与运维" }),
+  ).toHaveCount(0);
   expect(errors).toEqual([]);
+});
+
+test("navigation closes on selection, escape, backdrop and desktop resize", async ({
+  page,
+  context,
+}) => {
+  const login = await context.request.post("/api/v1/auth/login", {
+    headers: { Origin: "http://admin.localhost:18080" },
+    data: { username: "admin", password: "browser-test-password", code: "" },
+  });
+  expect(login.ok()).toBeTruthy();
+  const navigationSite = defaultSite();
+  navigationSite.id = "navigation-site";
+  navigationSite.name = "布局检查";
+  await page.route("**/api/v1/config/draft", (route) =>
+    route.fulfill({
+      json: {
+        version: 1,
+        base_revision: 0,
+        bundle: { sites: [navigationSite] },
+      },
+    }),
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  const toggle = page.getByRole("button", { name: "打开导航" });
+  const navigation = page.getByRole("dialog", { name: "WAF 控制台" });
+  await toggle.click();
+  await expect(navigation).toBeVisible();
+  await navigation.getByRole("menuitem", { name: "站点管理" }).click();
+  await expect(
+    page.getByRole("heading", { name: "站点管理", exact: true }),
+  ).toBeVisible();
+  await expect(navigation).toBeHidden();
+  await expectPageFits(page);
+
+  await page.getByRole("button", { name: "添加站点" }).click();
+  const siteDialog = page.getByRole("dialog", { name: "添加站点" });
+  await siteDialog
+    .getByLabel("显示名称", { exact: true })
+    .fill("用于检查窄屏显示的较长站点名称");
+  await expectPageFits(page);
+  await siteDialog.getByRole("button", { name: "取消", exact: true }).click();
+
+  await toggle.click();
+  await expect(
+    navigation.getByRole("menuitem", { name: "站点管理" }),
+  ).toHaveClass(/ant-menu-item-selected/);
+  await page.keyboard.press("Escape");
+  await expect(navigation).toBeHidden();
+  await expect(toggle).toBeFocused();
+
+  await toggle.click();
+  await expect(navigation).toBeVisible();
+  await page
+    .locator(".ant-drawer-mask")
+    .click({ position: { x: 380, y: 100 } });
+  await expect(navigation).toBeHidden();
+  await toggle.click();
+  await navigation
+    .getByRole("menuitem", { name: "安全规则", exact: true })
+    .click();
+  await expect(navigation).toBeHidden();
+  await page.getByRole("button", { name: "配置托管规则" }).click();
+  await expect(page.getByText("规则目录", { exact: true })).toBeVisible();
+  await page
+    .getByRole("dialog", { name: "配置托管规则" })
+    .getByRole("button", { name: "关闭", exact: true })
+    .click();
+  await expectPageFits(page);
+
+  await toggle.click();
+  await expect(navigation).toBeVisible();
+  for (const width of [768, 1440]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await expect(navigation).toBeHidden();
+    await expect(toggle).toHaveCount(0);
+    await expect(page.locator(".sidebar")).toBeVisible();
+    await expectPageFits(page);
+    await page.getByRole("menuitem", { name: "站点管理" }).click();
+    await page.getByRole("button", { name: "添加站点" }).click();
+    await expectPageFits(page);
+    await siteDialog.getByRole("button", { name: "取消", exact: true }).click();
+    await page.getByRole("menuitem", { name: "安全规则", exact: true }).click();
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(toggle).toBeVisible();
+  await expect(navigation).toBeHidden();
+  await toggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(navigation).toBeVisible();
+  await navigation.getByRole("button", { name: "关闭导航" }).click();
+  await expect(toggle).toBeFocused();
 });
 
 test("browser solves multiple challenge scopes and backup API returns encrypted data", async ({
@@ -130,15 +252,14 @@ test("browser solves multiple challenge scopes and backup API returns encrypted 
   ];
   site.domains = ["challenge.localhost"];
   site.managed.mode = "block";
-  site.bot.difficulty = 8;
-  site.routes.forEach((r) => (r.allow_challenge = true));
   site.rules = [1, 2].map((n) => ({
     id: `challenge-${n}`,
     name: `Challenge ${n}`,
     enabled: true,
     priority: n,
     expression: "true",
-    action: "challenge" as const,
+    action: "non_interactive_challenge" as const,
+    challenge: { work_factor: 1000, clearance_seconds: 1800 },
     skip: [],
   }));
   draft.bundle.sites.push(site);

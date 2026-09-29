@@ -6,8 +6,10 @@ import {
   Avatar,
   Button,
   ConfigProvider,
+  Drawer,
   Dropdown,
   Form,
+  Grid,
   Input,
   Layout,
   Menu,
@@ -24,31 +26,22 @@ import {
   AuditOutlined,
   CloudServerOutlined,
   DashboardOutlined,
-  FileProtectOutlined,
   FileSearchOutlined,
   GlobalOutlined,
   HistoryOutlined,
   KeyOutlined,
   LogoutOutlined,
-  RobotOutlined,
+  MenuOutlined,
   SaveOutlined,
   SecurityScanOutlined,
   SendOutlined,
   TeamOutlined,
-  ThunderboltOutlined,
   UserOutlined,
 } from "@ant-design/icons";
 import { api, setCSRF } from "./api";
 import { normalizeSite } from "./types";
 import type { Draft, Revision, SecurityEvent, Session, Site } from "./types";
-import {
-  BotPage,
-  CustomPage,
-  ManagedPage,
-  RatePage,
-  RoutesPage,
-  SitesPage,
-} from "./PolicyPages";
+import { SecurityRulesPage, RoutesPage, SitesPage } from "./PolicyPages";
 import type { PolicyProps } from "./PolicyPages";
 import {
   AuditPage,
@@ -61,6 +54,15 @@ import {
 } from "./OperationsPages";
 import "./style.css";
 const { Title, Text, Paragraph } = Typography;
+const loginErrors: Record<string, string> = {
+  invalid_credentials_or_mfa: "用户名、密码或验证码不正确",
+  login_rate_limited: "登录尝试过于频繁，请稍后再试",
+  login_busy: "服务繁忙，请稍后再试",
+  admin_busy: "服务繁忙，请稍后再试",
+  invalid_origin: "请从管理后台地址重新打开登录页",
+  https_required: "请使用 HTTPS 地址登录",
+  access_denied: "当前地址无法访问管理后台，请联系管理员",
+};
 function Login({ onLogin }: { onLogin: (s: Session) => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -76,53 +78,20 @@ function Login({ onLogin }: { onLogin: (s: Session) => void }) {
         await api<Session>("/auth/login", "POST", { ...v, code: v.code || "" }),
       );
     } catch (e) {
-      setError((e as Error).message);
+      setError(loginErrors[(e as Error).message] || "登录失败，请稍后重试");
     } finally {
       setBusy(false);
     }
   };
   return (
-    <div className="login-page">
-      <div className="login-brand">
-        <div className="brand-mark">
-          <SecurityScanOutlined aria-hidden="true" />
-        </div>
-        <span>
-          WAF <small>SECURITY CONSOLE</small>
-        </span>
-      </div>
+    <main className="login-page">
       <div className="login-content">
-        <div className="login-story">
-          <div className="eyebrow">YOUR APPLICATIONS. PROTECTED.</div>
-          <h1>
-            守护每一次
-            <br />
-            <span>连接。</span>
-          </h1>
-          <p>
-            统一管理站点、访问策略与安全事件，
-            <br />
-            让应用防护清晰可见。
-          </p>
-          <div className="login-features">
-            <span>
-              <FileProtectOutlined aria-hidden="true" /> OWASP 托管规则
-            </span>
-            <span>
-              <ThunderboltOutlined aria-hidden="true" /> 实时流量防护
-            </span>
-            <span>
-              <KeyOutlined aria-hidden="true" /> 自动 HTTPS
-            </span>
-          </div>
-          <div className="orbit orbit-one" />
-          <div className="orbit orbit-two" />
+        <div className="login-brand">
+          <SecurityScanOutlined aria-hidden="true" />
+          <span>WAF</span>
         </div>
         <div className="login-card">
-          <Title level={2}>登录安全控制台</Title>
-          <Paragraph type="secondary">
-            使用管理员提供的账号与双因素认证。
-          </Paragraph>
+          <Title level={1}>登录控制台</Title>
           {error && (
             <Alert
               type="error"
@@ -141,7 +110,7 @@ function Login({ onLogin }: { onLogin: (s: Session) => void }) {
                 size="large"
                 prefix={<UserOutlined aria-hidden="true" />}
                 autoComplete="username"
-                placeholder="admin"
+                placeholder="请输入用户名"
               />
             </Form.Item>
             <Form.Item
@@ -153,13 +122,13 @@ function Login({ onLogin }: { onLogin: (s: Session) => void }) {
             </Form.Item>
             <Form.Item
               name="code"
-              label="动态验证码或恢复码"
-              extra="公网环境必须填写；本地开发模式允许留空。"
+              label="验证码或恢复码"
+              extra="填写验证器中的 6 位验证码，或使用一次性恢复码。"
             >
               <Input
                 size="large"
                 autoComplete="one-time-code"
-                placeholder="6 位 TOTP 或一次性恢复码"
+                placeholder="请输入验证码或恢复码"
               />
             </Form.Item>
             <Button
@@ -169,22 +138,20 @@ function Login({ onLogin }: { onLogin: (s: Session) => void }) {
               htmlType="submit"
               loading={busy}
             >
-              安全登录
+              登录
             </Button>
           </Form>
-          <div className="login-help">
-            账号初始化与恢复由本机管理员通过 CLI 完成。
-          </div>
         </div>
+        <p className="login-help">无法登录时请联系管理员</p>
       </div>
-      <footer>WAF · 自托管应用安全</footer>
-    </div>
+    </main>
   );
 }
 function Console() {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState("overview");
+  const [managedRequest, setManagedRequest] = useState(0);
   const [draft, setDraft] = useState<Draft>();
   const [active, setActive] = useState<Site[]>([]);
   const [selected, setSelected] = useState("");
@@ -193,6 +160,12 @@ function Console() {
   const [refresh, setRefresh] = useState(0);
   const [loadError, setLoadError] = useState("");
   const [collapsed, setCollapsed] = useState(false);
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  const screens = Grid.useBreakpoint();
+  const mobile = screens.md === false;
+  useEffect(() => {
+    if (!mobile) setNavigationOpen(false);
+  }, [mobile]);
   const acceptSession = (s: Session) => {
     setCSRF(s.csrf_token);
     setSession(s);
@@ -269,7 +242,7 @@ function Console() {
     setBusy(true);
     try {
       await api("/config/validate", "POST", draft.bundle);
-      message.success("全部配置与规则编译校验通过");
+      message.success("配置校验通过");
     } catch (e) {
       Modal.error({
         title: "配置校验失败",
@@ -347,30 +320,63 @@ function Console() {
     editable,
   };
   const menu = [
-    { key: "overview", icon: <DashboardOutlined aria-hidden="true" />, label: "安全概览" },
-    { key: "sites", icon: <GlobalOutlined aria-hidden="true" />, label: "站点管理" },
+    {
+      key: "overview",
+      icon: <DashboardOutlined aria-hidden="true" />,
+      label: "安全概览",
+    },
+    {
+      key: "sites",
+      icon: <GlobalOutlined aria-hidden="true" />,
+      label: "站点管理",
+    },
     {
       type: "group" as const,
       label: "安全策略",
       children: [
-        { key: "managed", icon: <FileProtectOutlined aria-hidden="true" />, label: "托管规则" },
-        { key: "custom", icon: <SecurityScanOutlined aria-hidden="true" />, label: "自定义规则" },
-        { key: "rate", icon: <ThunderboltOutlined aria-hidden="true" />, label: "请求限流" },
-        { key: "bot", icon: <RobotOutlined aria-hidden="true" />, label: "Bot 与浏览器挑战" },
-        { key: "routes", icon: <ApiOutlined aria-hidden="true" />, label: "路径与流式策略" },
+        {
+          key: "security",
+          icon: <SecurityScanOutlined aria-hidden="true" />,
+          label: "安全规则",
+        },
+        {
+          key: "routes",
+          icon: <ApiOutlined aria-hidden="true" />,
+          label: "路径与流式策略",
+        },
       ],
     },
     {
       type: "group" as const,
       label: "运行与管理",
       children: [
-        { key: "events", icon: <FileSearchOutlined aria-hidden="true" />, label: "安全事件" },
-        { key: "certificates", icon: <KeyOutlined aria-hidden="true" />, label: "证书与凭据" },
-        { key: "revisions", icon: <HistoryOutlined aria-hidden="true" />, label: "配置版本" },
-        { key: "audit", icon: <AuditOutlined aria-hidden="true" />, label: "操作审计" },
+        {
+          key: "events",
+          icon: <FileSearchOutlined aria-hidden="true" />,
+          label: "安全事件",
+        },
+        {
+          key: "certificates",
+          icon: <KeyOutlined aria-hidden="true" />,
+          label: "证书与凭据",
+        },
+        {
+          key: "revisions",
+          icon: <HistoryOutlined aria-hidden="true" />,
+          label: "配置版本",
+        },
+        {
+          key: "audit",
+          icon: <AuditOutlined aria-hidden="true" />,
+          label: "操作审计",
+        },
         ...(admin
           ? [
-              { key: "users", icon: <TeamOutlined aria-hidden="true" />, label: "用户与权限" },
+              {
+                key: "users",
+                icon: <TeamOutlined aria-hidden="true" />,
+                label: "用户与权限",
+              },
               {
                 key: "backups",
                 icon: <CloudServerOutlined aria-hidden="true" />,
@@ -384,10 +390,7 @@ function Console() {
   const titles: Record<string, string> = {
     overview: "安全概览",
     sites: "站点管理",
-    managed: "托管规则",
-    custom: "自定义规则",
-    rate: "请求限流",
-    bot: "Bot 与浏览器挑战",
+    security: "安全规则",
     routes: "路径与流式策略",
     events: "安全事件",
     certificates: "证书与凭据",
@@ -419,7 +422,8 @@ function Console() {
       ),
     );
     setSelected(site.id);
-    setPage("managed");
+    setManagedRequest((v) => v + 1);
+    setPage("security");
     message.success("例外已加入草稿，请检查范围后发布");
   };
   let content: React.ReactNode;
@@ -427,17 +431,15 @@ function Console() {
     case "sites":
       content = <SitesPage {...props} />;
       break;
-    case "managed":
-      content = <ManagedPage {...props} />;
-      break;
-    case "custom":
-      content = <CustomPage {...props} />;
-      break;
-    case "rate":
-      content = <RatePage {...props} />;
-      break;
-    case "bot":
-      content = <BotPage {...props} />;
+    case "security":
+      content = (
+        <SecurityRulesPage
+          key={selected}
+          {...props}
+          managedRequest={managedRequest}
+          onManagedClose={() => setManagedRequest(0)}
+        />
+      );
       break;
     case "routes":
       content = <RoutesPage {...props} />;
@@ -475,48 +477,81 @@ function Console() {
     default:
       content = <OverviewPage sites={active} refresh={refresh} />;
   }
+  const navigation = (
+    <Menu
+      theme="dark"
+      mode="inline"
+      selectedKeys={[page]}
+      onClick={({ key }) => {
+        setPage(key);
+        setManagedRequest(0);
+        setNavigationOpen(false);
+      }}
+      items={menu}
+    />
+  );
   return (
     <Layout className="console-layout">
-      <Layout.Sider
-        width={236}
-        collapsed={collapsed}
-        collapsible
-        onCollapse={setCollapsed}
-        breakpoint="lg"
-        className="sidebar"
-      >
-        <div className="sidebar-brand">
-          <SecurityScanOutlined aria-hidden="true" />
-          {!collapsed && (
-            <span>
-              WAF <small>安全控制台</small>
-            </span>
-          )}
-        </div>
-        <Menu
-          theme="dark"
-          mode="inline"
-          selectedKeys={[page]}
-          onClick={({ key }) => setPage(key)}
-          items={menu}
-        />
-      </Layout.Sider>
+      {mobile ? (
+        <Drawer
+          title="WAF 控制台"
+          placement="left"
+          size={272}
+          open={navigationOpen}
+          onClose={() => setNavigationOpen(false)}
+          classNames={{ section: "navigation-drawer" }}
+          styles={{ body: { padding: "8px 0" } }}
+          closable={{ "aria-label": "关闭导航" }}
+        >
+          {navigation}
+        </Drawer>
+      ) : (
+        <Layout.Sider
+          width={224}
+          collapsed={collapsed}
+          collapsible
+          onCollapse={setCollapsed}
+          breakpoint="lg"
+          className="sidebar"
+        >
+          <div className="sidebar-brand">
+            <SecurityScanOutlined aria-hidden="true" />
+            {!collapsed && (
+              <span>
+                WAF <small>控制台</small>
+              </span>
+            )}
+          </div>
+          {navigation}
+        </Layout.Sider>
+      )}
       <Layout className="main-layout">
         <Layout.Header className="topbar">
-          <div>
-            <Text type="secondary">工作空间</Text>
-            <span className="header-separator">/</span>
-            <Text strong>{titles[page]}</Text>
+          <div className="topbar-heading">
+            {mobile && (
+              <Button
+                type="text"
+                icon={<MenuOutlined aria-hidden="true" />}
+                aria-label="打开导航"
+                aria-expanded={navigationOpen}
+                onClick={() => setNavigationOpen(true)}
+              />
+            )}
+            <Title level={1}>{titles[page]}</Title>
           </div>
-          <Space size={16}>
-            {session.development && <Tag color="orange">本地开发模式</Tag>}
-            <Tag color="cyan">单机节点</Tag>
+          <Space size={12} className="topbar-account">
+            {session.development && (
+              <Tag color="orange" className="development-tag">
+                开发模式
+              </Tag>
+            )}
             <Dropdown
+              trigger={["click"]}
               menu={{
                 items: [
                   {
                     key: "user",
-                    label: `${session.user.username} · ${session.user.role}`,
+                    label: `${session.user.username} · ${{ admin: "管理员", operator: "操作员", viewer: "只读用户" }[session.user.role]}`,
                     disabled: true,
                   },
                   {
@@ -528,56 +563,21 @@ function Console() {
                 ],
               }}
             >
-              <Space className="user-menu">
-                <Avatar size="small" icon={<UserOutlined aria-hidden="true" />} />
-                <Text>{session.user.username}</Text>
-              </Space>
+              <button
+                type="button"
+                className="user-menu"
+                aria-label={`账户：${session.user.username}`}
+              >
+                <Avatar
+                  size="small"
+                  icon={<UserOutlined aria-hidden="true" />}
+                />
+                <span className="user-name">{session.user.username}</span>
+              </button>
             </Dropdown>
           </Space>
         </Layout.Header>
         <Layout.Content className="content">
-          <div className="page-heading">
-            <div>
-              <div className="eyebrow">WAF CONTROL CENTER</div>
-              <Title level={3}>{titles[page]}</Title>
-            </div>
-            <Space wrap>
-              {editable && (
-                <>
-                  <Button
-                    icon={<SaveOutlined aria-hidden="true" />}
-                    disabled={!dirty || busy}
-                    onClick={() => void saveClick()}
-                  >
-                    保存草稿
-                  </Button>
-                  <Button
-                    disabled={!draft || busy}
-                    onClick={() => void validate()}
-                  >
-                    校验配置
-                  </Button>
-                  <Button
-                    type="primary"
-                    icon={<SendOutlined aria-hidden="true" />}
-                    loading={busy}
-                    disabled={!draft}
-                    onClick={() =>
-                      Modal.confirm({
-                        title: "发布当前配置？",
-                        content:
-                          "所有站点的草稿将在校验通过后生效。既有 SSE 和 WebSocket 连接继续使用当前连接配置。",
-                        okText: "校验并发布",
-                        onOk: publish,
-                      })
-                    }
-                  >
-                    发布配置
-                  </Button>
-                </>
-              )}
-            </Space>
-          </div>
           {loadError ? (
             <Alert
               type="error"
@@ -597,54 +597,96 @@ function Console() {
           ) : (
             <>
               <div className={`draft-bar ${dirty ? "changed" : ""}`}>
-                <Space>
-                  <span className="status-dot" />
-                  <Text>{dirty ? "有未保存的修改" : "草稿已与服务器同步"}</Text>
-                  <Text type="secondary">
-                    基于配置 v{draft?.base_revision || 0} · 草稿 #
-                    {draft?.version || 0}
-                  </Text>
-                </Space>
-                <Button
-                  type="link"
-                  size="small"
-                  onClick={() => {
-                    if (dirty)
-                      Modal.confirm({
-                        title: "放弃本地未保存修改并重新加载？",
-                        onOk: reload,
-                      });
-                    else void reload().catch((e) => message.error(e.message));
-                  }}
-                >
-                  重新加载
-                </Button>
+                <div className="draft-status" aria-live="polite">
+                  <Space>
+                    <span className="status-dot" />
+                    <Text>
+                      {!draft
+                        ? "正在加载配置"
+                        : dirty
+                          ? "有未保存的修改"
+                          : "草稿已保存"}
+                    </Text>
+                  </Space>
+                  {draft && (
+                    <Text type="secondary" className="draft-version">
+                      基于配置 v{draft.base_revision} · 草稿 #{draft.version}
+                    </Text>
+                  )}
+                </div>
+                <div className="draft-actions">
+                  <Button
+                    type="text"
+                    disabled={!draft || busy}
+                    onClick={() => {
+                      if (dirty)
+                        Modal.confirm({
+                          title: "放弃未保存的修改并重新加载？",
+                          onOk: reload,
+                        });
+                      else void reload().catch((e) => message.error(e.message));
+                    }}
+                  >
+                    重新加载
+                  </Button>
+                  {editable && (
+                    <>
+                      <Button
+                        icon={<SaveOutlined aria-hidden="true" />}
+                        disabled={!dirty || busy}
+                        onClick={() => void saveClick()}
+                      >
+                        保存草稿
+                      </Button>
+                      <Button
+                        disabled={!draft || busy}
+                        onClick={() => void validate()}
+                      >
+                        校验配置
+                      </Button>
+                      <Button
+                        type="primary"
+                        icon={<SendOutlined aria-hidden="true" />}
+                        loading={busy}
+                        disabled={!draft}
+                        onClick={() =>
+                          Modal.confirm({
+                            title: "发布当前配置？",
+                            content:
+                              "所有站点的草稿将在校验通过后生效。已建立的 SSE 和 WebSocket 连接继续使用原配置。",
+                            okText: "校验并发布",
+                            onOk: publish,
+                          })
+                        }
+                      >
+                        发布配置
+                      </Button>
+                    </>
+                  )}
+                </div>
               </div>
               {editable && (
                 <Paragraph type="secondary" className="draft-note">
-                  站点与策略修改先进入草稿，发布后才影响流量。证书凭据与账号设置即时生效。
+                  站点和策略修改发布后生效；凭据和账号修改立即生效。
                 </Paragraph>
               )}
               {draft ? content : <Spin />}
             </>
           )}
         </Layout.Content>
-        <Layout.Footer className="footer">
-          WAF · Go 反向代理与 OWASP CRS <span>配置可追溯 · 流式连接可观测</span>
-        </Layout.Footer>
       </Layout>
     </Layout>
   );
 }
 createRoot(document.getElementById("root")!).render(
   <ConfigProvider
-    button={{autoInsertSpace:false}}
+    button={{ autoInsertSpace: false }}
     locale={zhCN}
     theme={{
       token: {
         colorPrimary: "#087f72",
         colorInfo: "#087f72",
-        borderRadius: 9,
+        borderRadius: 8,
         fontFamily:
           'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
         colorBgLayout: "#f3f5f8",

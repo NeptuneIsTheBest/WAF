@@ -3,7 +3,8 @@
 单机部署的 Go 反向代理与应用防火墙，内置中文管理后台。运行时无需 Go、Node.js、Redis 或外部数据库。
 
 - 多站点、多上游、健康检查、配置发布与回滚。
-- Coraza / OWASP CRS 托管规则、CEL 自定义规则、限流与浏览器挑战。
+- 统一安全规则页面：CEL 自定义规则、速率限制规则、Coraza / OWASP CRS 托管规则。
+- 本地 ALTCHA 质询：自动、交互、自适应三种 Action，按规则设置通行有效期。
 - HTTP/2、SSE、WebSocket 和按路径配置的流式上传。
 - Cloudflare DNS-01 自动 HTTPS、密码与 TOTP 登录、角色权限和操作审计。
 - SQLite 存储、加密凭据、加密备份及 Prometheus 指标。

@@ -3,6 +3,8 @@ import {
   Alert,
   Button,
   Card,
+  Collapse,
+  Drawer,
   Col,
   Empty,
   Form,
@@ -13,7 +15,6 @@ import {
   Radio,
   Row,
   Select,
-  Slider,
   Space,
   Switch,
   Table,
@@ -27,8 +28,13 @@ import {
   EditOutlined,
   ExperimentOutlined,
 } from "@ant-design/icons";
-import { api } from "./api";
-import { defaultRoute, defaultSite } from "./types";
+import { actionColor, api, ruleActionOptions } from "./api";
+import {
+  defaultChallenge,
+  defaultRoute,
+  defaultSite,
+  isChallengeAction,
+} from "./types";
 import type {
   CustomRule,
   Exclusion,
@@ -52,7 +58,7 @@ function SitePick(p: PolicyProps) {
       placeholder="选择站点"
       value={p.selected || undefined}
       onChange={p.select}
-      style={{ minWidth: 220 }}
+      className="site-select"
       options={p.sites.map((s) => ({ value: s.id, label: s.name || s.id }))}
     />
   );
@@ -100,7 +106,7 @@ export function SitesPage(p: PolicyProps) {
   return (
     <>
       <Card
-        title="站点接入"
+        title="站点列表"
         extra={
           <Button
             type="primary"
@@ -206,12 +212,12 @@ export function SitesPage(p: PolicyProps) {
           }}
         >
           <Row gutter={20}>
-            <Col span={12}>
+            <Col xs={24} md={12}>
               <Form.Item name="id" label="站点标识" rules={idRules}>
                 <Input disabled={!!editing} placeholder="main-site" />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col xs={24} md={12}>
               <Form.Item
                 name="name"
                 label="显示名称"
@@ -225,7 +231,7 @@ export function SitesPage(p: PolicyProps) {
             name="domains"
             label="域名"
             rules={[{ required: true }]}
-            extra="支持 *.example.com；管理后台域名保留，不可用于业务站点。"
+            extra="支持 *.example.com，不可使用管理后台域名。"
           >
             <Select
               mode="tags"
@@ -234,7 +240,7 @@ export function SitesPage(p: PolicyProps) {
             />
           </Form.Item>
           <Row gutter={20}>
-            <Col span={8}>
+            <Col xs={24} md={8}>
               <Form.Item
                 name="enabled"
                 label="启用站点"
@@ -243,7 +249,7 @@ export function SitesPage(p: PolicyProps) {
                 <Switch />
               </Form.Item>
             </Col>
-            <Col span={8}>
+            <Col xs={24} md={8}>
               <Form.Item
                 name="https"
                 label="自动 HTTPS"
@@ -252,7 +258,7 @@ export function SitesPage(p: PolicyProps) {
                 <Switch />
               </Form.Item>
             </Col>
-            <Col span={8}>
+            <Col xs={24} md={8}>
               <Form.Item
                 name="redirect_http"
                 label="HTTP 跳转 HTTPS"
@@ -276,7 +282,7 @@ export function SitesPage(p: PolicyProps) {
                 </div>
                 {fields.map((f) => (
                   <Row gutter={12} key={f.key} align="middle">
-                    <Col span={12}>
+                    <Col xs={24} md={12}>
                       <Form.Item
                         name={[f.name, "url"]}
                         label="上游 URL"
@@ -285,12 +291,12 @@ export function SitesPage(p: PolicyProps) {
                         <Input placeholder="http://127.0.0.1:3000" />
                       </Form.Item>
                     </Col>
-                    <Col span={4}>
+                    <Col xs={24} md={4}>
                       <Form.Item name={[f.name, "weight"]} label="权重">
                         <InputNumber min={1} max={100} />
                       </Form.Item>
                     </Col>
-                    <Col span={6}>
+                    <Col xs={24} md={6}>
                       <Form.Item
                         name={[f.name, "health_path"]}
                         label="健康检查路径"
@@ -298,7 +304,7 @@ export function SitesPage(p: PolicyProps) {
                         <Input placeholder="/health（留空关闭）" />
                       </Form.Item>
                     </Col>
-                    <Col span={2}>
+                    <Col xs={24} md={2}>
                       <Button
                         aria-label="删除上游"
                         icon={<DeleteOutlined aria-hidden="true" />}
@@ -318,7 +324,7 @@ export function SitesPage(p: PolicyProps) {
             )}
           </Form.List>
           <Row gutter={20} className="form-top">
-            <Col span={10}>
+            <Col xs={24} md={10}>
               <Form.Item
                 name="max_connections_per_ip"
                 label="每个 IP 的 WebSocket 连接上限"
@@ -326,7 +332,7 @@ export function SitesPage(p: PolicyProps) {
                 <InputNumber min={1} max={8192} />
               </Form.Item>
             </Col>
-            <Col span={14}>
+            <Col xs={24} md={14}>
               <Form.Item
                 name="websocket_origins"
                 label="允许的 WebSocket Origin"
@@ -341,6 +347,111 @@ export function SitesPage(p: PolicyProps) {
     </>
   );
 }
+export function SecurityRulesPage(
+  p: PolicyProps & { managedRequest: number; onManagedClose: () => void },
+) {
+  const { site } = useSite(p);
+  const [managedOpen, setManagedOpen] = useState(false);
+  useEffect(() => {
+    if (p.managedRequest > 0) setManagedOpen(true);
+  }, [p.managedRequest]);
+  return (
+    <Space
+      orientation="vertical"
+      size={20}
+      className="full-width security-rules"
+    >
+      <Card>
+        <div className="security-rules-heading">
+          <div>
+            <Text strong>统一管理站点防护</Text>
+            <Paragraph type="secondary">
+              按自定义规则、速率限制规则、托管规则的顺序执行。修改保存到草稿，发布后生效。
+            </Paragraph>
+          </div>
+          <SitePick {...p} />
+        </div>
+        {site && (
+          <Space wrap>
+            <Tag>
+              自定义规则 {site.rules.filter((r) => r.enabled).length} /{" "}
+              {site.rules.length}
+            </Tag>
+            <Tag>
+              速率限制规则 {site.rate_limits.filter((r) => r.enabled).length} /{" "}
+              {site.rate_limits.length}
+            </Tag>
+            <Tag>托管规则 · OWASP CRS</Tag>
+          </Space>
+        )}
+      </Card>
+      {site ? (
+        <>
+          <section aria-label="自定义规则">
+            <CustomPage {...p} />
+          </section>
+          <section aria-label="速率限制规则">
+            <RatePage {...p} />
+          </section>
+          <section aria-label="托管规则">
+            <Card
+              title="托管规则"
+              extra={
+                <Button onClick={() => setManagedOpen(true)}>
+                  配置托管规则
+                </Button>
+              }
+            >
+              <Space orientation="vertical" size={12}>
+                <Space wrap>
+                  <Text strong>OWASP Core Rule Set</Text>
+                  <Tag
+                    color={
+                      site.managed.mode === "block"
+                        ? "green"
+                        : site.managed.mode === "observe"
+                          ? "orange"
+                          : "default"
+                    }
+                  >
+                    {site.managed.mode === "block"
+                      ? "拦截"
+                      : site.managed.mode === "observe"
+                        ? "观察"
+                        : "关闭"}
+                  </Tag>
+                </Space>
+                <Text type="secondary">
+                  检测 SQL 注入、跨站脚本等常见攻击。新站点默认观察模式。
+                </Text>
+                <Space wrap>
+                  <Tag>敏感等级 PL{site.managed.paranoia}</Tag>
+                  <Tag>异常分数阈值 {site.managed.threshold}</Tag>
+                  <Tag>规则例外 {site.managed.exclusions.length}</Tag>
+                </Space>
+              </Space>
+            </Card>
+          </section>
+          <Drawer
+            title="配置托管规则"
+            open={managedOpen}
+            size={1000}
+            destroyOnHidden
+            onClose={() => {
+              setManagedOpen(false);
+              p.onManagedClose();
+            }}
+          >
+            <ManagedPage {...p} />
+          </Drawer>
+        </>
+      ) : (
+        empty
+      )}
+    </Space>
+  );
+}
+
 export function ManagedPage(p: PolicyProps) {
   const { site, update } = useSite(p);
   const [rules, setRules] = useState<ManagedRule[]>([]);
@@ -382,7 +493,7 @@ export function ManagedPage(p: PolicyProps) {
   );
   return (
     <Space orientation="vertical" size={20} className="full-width">
-      <Card title="托管规则 · OWASP CRS" extra={<SitePick {...p} />}>
+      <Card title="OWASP CRS 设置">
         {site ? (
           <>
             <Alert
@@ -393,10 +504,10 @@ export function ManagedPage(p: PolicyProps) {
                   ? "拦截模式：命中阈值时拒绝请求"
                   : "观察或关闭模式不会执行托管规则拦截"
               }
-              description="新站点先观察正常流量，再针对路径、参数建立例外。规则集随软件版本更新。"
+              description="新站点默认观察模式。发现误报时，可按路径或参数添加例外；规则集随软件更新。"
             />
-            <Row gutter={24} className="form-top">
-              <Col span={12}>
+            <Row gutter={[24, 16]} className="form-top">
+              <Col xs={24} md={12}>
                 <Text strong>运行模式</Text>
                 <div className="form-top">
                   <Radio.Group
@@ -416,7 +527,7 @@ export function ManagedPage(p: PolicyProps) {
                   />
                 </div>
               </Col>
-              <Col span={6}>
+              <Col xs={24} md={6}>
                 <Text strong>敏感等级</Text>
                 <div className="form-top">
                   <Select
@@ -435,7 +546,7 @@ export function ManagedPage(p: PolicyProps) {
                   />
                 </div>
               </Col>
-              <Col span={6}>
+              <Col xs={24} md={6}>
                 <Text strong>异常分数阈值</Text>
                 <div className="form-top">
                   <InputNumber
@@ -463,7 +574,7 @@ export function ManagedPage(p: PolicyProps) {
           <Card
             title="规则目录"
             extra={
-              <Space>
+              <div className="filter-bar">
                 <Select
                   allowClear
                   placeholder="全部分类"
@@ -481,7 +592,7 @@ export function ManagedPage(p: PolicyProps) {
                   onChange={(e) => setSearch(e.target.value)}
                   style={{ width: 240 }}
                 />
-              </Space>
+              </div>
             }
           >
             <Table
@@ -558,6 +669,7 @@ export function ManagedPage(p: PolicyProps) {
               rowKey={(_, i) => String(i)}
               dataSource={site.managed.exclusions}
               pagination={{ pageSize: 10 }}
+              scroll={{ x: 550 }}
               columns={[
                 { title: "规则 ID", dataIndex: "rule_id" },
                 {
@@ -597,7 +709,7 @@ export function ManagedPage(p: PolicyProps) {
         onOk={() => void addExclusion()}
         okText="加入草稿"
       >
-        <Form form={form} layout="vertical">
+        <Form name="managed-exclusion" form={form} layout="vertical">
           <Form.Item
             name="rule_id"
             label="规则 ID"
@@ -644,13 +756,18 @@ export function CustomPage(p: PolicyProps) {
   );
   const openEditor = (r?: CustomRule, i = -1) => {
     setIndex(i);
+    form.resetFields();
     form.setFieldsValue(
       r
-        ? structuredClone(r)
+        ? {
+            ...structuredClone(r),
+            challenge: r.challenge || defaultChallenge(),
+          }
         : {
             id: "",
             name: "",
             enabled: true,
+            challenge: defaultChallenge(),
             priority: 100,
             expression: 'request.path.startsWith("/admin")',
             action: "block",
@@ -662,6 +779,9 @@ export function CustomPage(p: PolicyProps) {
   const save = async () => {
     if (!site) return;
     const values = await form.validateFields();
+    if (!isChallengeAction(values.action)) delete values.challenge;
+    else values.challenge = { ...defaultChallenge(), ...values.challenge };
+    if (values.action !== "skip") values.skip = [];
     const rules = [...site.rules];
     if (index < 0) {
       if (rules.some((r) => r.id === values.id)) {
@@ -715,15 +835,14 @@ export function CustomPage(p: PolicyProps) {
       <Card
         title="自定义规则"
         extra={
-          <Space>
-            <SitePick {...p} />
+          <Space wrap>
             <Button
               type="primary"
               icon={<PlusOutlined aria-hidden="true" />}
               disabled={!site || !p.editable}
               onClick={() => openEditor()}
             >
-              添加规则
+              添加自定义规则
             </Button>
           </Space>
         }
@@ -731,8 +850,7 @@ export function CustomPage(p: PolicyProps) {
         {site ? (
           <>
             <Paragraph type="secondary">
-              规则按优先级从小到大执行。Skip
-              仅跳过指定组件；协议与资源上限始终生效。
+              优先级数值越小，规则越先执行。跳过操作只作用于所选检查，协议和资源限制仍然生效。
             </Paragraph>
             <Table
               dataSource={[...site.rules].sort(
@@ -762,7 +880,11 @@ export function CustomPage(p: PolicyProps) {
                   title: "动作",
                   dataIndex: "action",
                   render: (v: string) => (
-                    <Tag color={v === "block" ? "red" : "blue"}>{v}</Tag>
+                    <Tag color={actionColor[v]}>
+                      {ruleActionOptions
+                        .find((option) => option.value === v)
+                        ?.label.split(" · ")[0] || v}
+                    </Tag>
                   ),
                 },
                 {
@@ -830,19 +952,19 @@ export function CustomPage(p: PolicyProps) {
         onOk={() => void save()}
         okText="保存到草稿"
       >
-        <Form form={form} layout="vertical">
+        <Form name="custom-rule" form={form} layout="vertical">
           <Row gutter={20}>
-            <Col span={8}>
+            <Col xs={24} md={8}>
               <Form.Item name="id" label="规则标识" rules={idRules}>
                 <Input disabled={index >= 0} />
               </Form.Item>
             </Col>
-            <Col span={10}>
+            <Col xs={24} md={10}>
               <Form.Item name="name" label="显示名称">
                 <Input />
               </Form.Item>
             </Col>
-            <Col span={6}>
+            <Col xs={24} md={6}>
               <Form.Item name="priority" label="优先级">
                 <InputNumber min={0} max={100000} />
               </Form.Item>
@@ -856,15 +978,15 @@ export function CustomPage(p: PolicyProps) {
                 value={logic}
                 onChange={setLogic}
                 options={[
-                  { value: "&&", label: "全部满足 AND" },
-                  { value: "||", label: "任意满足 OR" },
+                  { value: "&&", label: "全部满足" },
+                  { value: "||", label: "任意满足" },
                 ]}
               />
             }
           >
             {conditions.map((c, i) => (
-              <Row gutter={8} key={i} className="condition-row">
-                <Col span={8}>
+              <Row gutter={[8, 8]} key={i} className="condition-row">
+                <Col xs={24} md={8}>
                   <Select
                     className="full-width"
                     value={c.field}
@@ -885,7 +1007,7 @@ export function CustomPage(p: PolicyProps) {
                     ].map((x) => ({ value: x, label: x }))}
                   />
                 </Col>
-                <Col span={6}>
+                <Col xs={24} md={6}>
                   <Select
                     className="full-width"
                     value={c.op}
@@ -904,7 +1026,7 @@ export function CustomPage(p: PolicyProps) {
                     ].map(([value, label]) => ({ value, label }))}
                   />
                 </Col>
-                <Col span={8}>
+                <Col xs={24} md={8}>
                   <Input
                     value={c.value}
                     onChange={(e) =>
@@ -916,9 +1038,10 @@ export function CustomPage(p: PolicyProps) {
                     }
                   />
                 </Col>
-                <Col span={2}>
+                <Col xs={24} md={2}>
                   <Button
                     icon={<DeleteOutlined aria-hidden="true" />}
+                    aria-label="删除条件"
                     disabled={conditions.length === 1}
                     onClick={() =>
                       setConditions(conditions.filter((_, j) => i !== j))
@@ -956,19 +1079,22 @@ export function CustomPage(p: PolicyProps) {
             <Input.TextArea rows={4} className="code-input" />
           </Form.Item>
           <Row gutter={20}>
-            <Col span={12}>
+            <Col xs={24} md={12}>
               <Form.Item name="action" label="动作">
                 <Select
-                  options={[
-                    { value: "block", label: "拦截 Block" },
-                    { value: "log", label: "记录 Log" },
-                    { value: "challenge", label: "浏览器挑战 Challenge" },
-                    { value: "skip", label: "跳过指定检查 Skip" },
-                  ]}
+                  virtual={false}
+                  options={ruleActionOptions}
+                  onChange={(action) => {
+                    if (
+                      isChallengeAction(action) &&
+                      !form.getFieldValue("challenge")
+                    )
+                      form.setFieldValue("challenge", defaultChallenge());
+                  }}
                 />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col xs={24} md={12}>
               <Form.Item name="enabled" label="启用" valuePropName="checked">
                 <Switch />
               </Form.Item>
@@ -979,25 +1105,107 @@ export function CustomPage(p: PolicyProps) {
               getFieldValue("action") === "skip" ? (
                 <Form.Item
                   name="skip"
-                  label="明确选择跳过范围"
+                  label="跳过哪些检查"
                   rules={[{ required: true }]}
                 >
                   <Select
                     mode="multiple"
                     options={[
-                      { value: "bot", label: "Bot 策略" },
+                      { value: "custom_rules", label: "剩余自定义规则" },
+                      { value: "rate_limits", label: "全部速率限制规则" },
                       { value: "managed", label: "托管规则" },
                       ...(site?.rate_limits || []).map((r) => ({
                         value: `rate:${r.id}`,
                         label: `限流 ${r.name || r.id}`,
                       })),
-                      ...(site?.rules || []).map((r) => ({
-                        value: `rule:${r.id}`,
-                        label: `自定义规则 ${r.name || r.id}`,
-                      })),
+                      ...(site?.rules || [])
+                        .filter((r) => r.id !== getFieldValue("id"))
+                        .map((r) => ({
+                          value: `rule:${r.id}`,
+                          label: `自定义规则 ${r.name || r.id}`,
+                        })),
                     ]}
                   />
                 </Form.Item>
+              ) : null
+            }
+          </Form.Item>
+          <Form.Item
+            noStyle
+            shouldUpdate={(previous, current) =>
+              previous.action !== current.action
+            }
+          >
+            {({ getFieldValue }) =>
+              isChallengeAction(getFieldValue("action")) ? (
+                <>
+                  <Alert
+                    className="form-top"
+                    showIcon
+                    type="info"
+                    title={
+                      getFieldValue("action") === "managed_challenge"
+                        ? "根据请求频率与验证失败记录，自动选择验证方式"
+                        : getFieldValue("action") === "interactive_challenge"
+                          ? "访客点击复选框后开始验证"
+                          : "浏览器自动完成验证"
+                    }
+                    description="浏览器页面通过验证后返回原地址；API、上传和流式请求由调用方重试。每条规则的通行有效期独立计算。"
+                  />
+                  <Collapse
+                    className="form-top"
+                    items={[
+                      {
+                        key: "challenge-options",
+                        label: "质询高级设置",
+                        forceRender: true,
+                        children: (
+                          <Row gutter={20}>
+                            <Col xs={24} md={12}>
+                              <Form.Item
+                                name={["challenge", "work_factor"]}
+                                label="计算强度"
+                                initialValue={5000}
+                                extra="默认 5000，数值越高，访客验证耗时越长。"
+                                rules={[
+                                  {
+                                    required: true,
+                                    type: "integer",
+                                    min: 1000,
+                                    max: 20000,
+                                  },
+                                ]}
+                              >
+                                <InputNumber
+                                  min={1000}
+                                  max={20000}
+                                  step={1000}
+                                />
+                              </Form.Item>
+                            </Col>
+                            <Col xs={24} md={12}>
+                              <Form.Item
+                                name={["challenge", "clearance_seconds"]}
+                                label="通行有效期（秒）"
+                                initialValue={1800}
+                                rules={[
+                                  {
+                                    required: true,
+                                    type: "integer",
+                                    min: 60,
+                                    max: 86400,
+                                  },
+                                ]}
+                              >
+                                <InputNumber min={60} max={86400} />
+                              </Form.Item>
+                            </Col>
+                          </Row>
+                        ),
+                      },
+                    ]}
+                  />
+                </>
               ) : null
             }
           </Form.Item>
@@ -1057,17 +1265,16 @@ export function RatePage(p: PolicyProps) {
   return (
     <>
       <Card
-        title="请求限流与临时封禁"
+        title="速率限制规则"
         extra={
-          <Space>
-            <SitePick {...p} />
+          <Space wrap>
             <Button
               type="primary"
               icon={<PlusOutlined aria-hidden="true" />}
               disabled={!site || !p.editable}
               onClick={() => edit()}
             >
-              添加策略
+              添加速率限制规则
             </Button>
           </Space>
         }
@@ -1077,6 +1284,7 @@ export function RatePage(p: PolicyProps) {
             rowKey="id"
             dataSource={site.rate_limits}
             pagination={false}
+            scroll={{ x: 800 }}
             columns={[
               { title: "策略", render: (_, r: RateLimit) => r.name || r.id },
               {
@@ -1149,13 +1357,13 @@ export function RatePage(p: PolicyProps) {
         )}
       </Card>
       <Modal
-        title="限流策略"
+        title="速率限制规则"
         open={open}
         onCancel={() => setOpen(false)}
         onOk={() => void save()}
         okText="保存到草稿"
       >
-        <Form form={form} layout="vertical">
+        <Form name="rate-rule" form={form} layout="vertical">
           <Form.Item name="id" label="策略标识" rules={idRules}>
             <Input disabled={index >= 0} />
           </Form.Item>
@@ -1179,12 +1387,12 @@ export function RatePage(p: PolicyProps) {
             />
           </Form.Item>
           <Row gutter={20}>
-            <Col span={12}>
+            <Col xs={24} md={12}>
               <Form.Item name="requests_per_second" label="每秒请求数">
                 <InputNumber min={0.01} max={100000} />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col xs={24} md={12}>
               <Form.Item name="burst" label="突发容量">
                 <InputNumber min={1} max={100000} />
               </Form.Item>
@@ -1202,102 +1410,6 @@ export function RatePage(p: PolicyProps) {
         </Form>
       </Modal>
     </>
-  );
-}
-export function BotPage(p: PolicyProps) {
-  const { site, update } = useSite(p);
-  const [form] = Form.useForm();
-  useEffect(() => {
-    if (site) form.setFieldsValue(site.bot);
-  }, [site?.id]);
-  return (
-    <Card title="Bot 防护与浏览器挑战" extra={<SitePick {...p} />}>
-      {site ? (
-        <>
-          <Alert
-            showIcon
-            type="info"
-            title="本地 JavaScript 工作量证明"
-            description="验证通过仅解除对应挑战。API、SSE、WebSocket 和上传不会被自动重定向或重放；挑战需要 HTTPS。"
-          />
-          <Form
-            form={form}
-            layout="vertical"
-            className="form-top"
-            disabled={!p.editable}
-            onFinish={(v) => {
-              update({ ...site, bot: v });
-              message.success("已更新草稿");
-            }}
-          >
-            <Row gutter={24}>
-              <Col span={8}>
-                <Form.Item
-                  name="enabled"
-                  label="启用 Bot 策略"
-                  valuePropName="checked"
-                >
-                  <Switch />
-                </Form.Item>
-              </Col>
-              <Col span={8}>
-                <Form.Item name="action" label="命中后的动作">
-                  <Select
-                    options={[
-                      { value: "challenge", label: "浏览器挑战" },
-                      { value: "block", label: "直接拦截" },
-                    ]}
-                  />
-                </Form.Item>
-              </Col>
-              <Col span={8}>
-                <Form.Item
-                  name="requests_per_minute"
-                  label="单 IP 每分钟请求阈值"
-                >
-                  <InputNumber min={1} max={100000} />
-                </Form.Item>
-              </Col>
-            </Row>
-            <Form.Item
-              name="user_agent_patterns"
-              label="可疑 User-Agent 正则"
-              extra="这些特征可以被伪造，应结合速率与挑战结果使用。"
-            >
-              <Select mode="tags" placeholder="例如 (?i)(sqlmap|nikto)" />
-            </Form.Item>
-            <Row gutter={32}>
-              <Col span={14}>
-                <Form.Item
-                  name="difficulty"
-                  label="挑战难度（前导零位数）"
-                  extra="默认 16；提高难度会增加移动设备的等待时间。"
-                >
-                  <Slider
-                    min={8}
-                    max={22}
-                    marks={{ 8: "8", 16: "16", 22: "22" }}
-                  />
-                </Form.Item>
-              </Col>
-              <Col span={10}>
-                <Form.Item
-                  name="clearance_seconds"
-                  label="通行凭证有效期（秒）"
-                >
-                  <InputNumber min={60} max={86400} />
-                </Form.Item>
-              </Col>
-            </Row>
-            <Button type="primary" htmlType="submit">
-              保存到草稿
-            </Button>
-          </Form>
-        </>
-      ) : (
-        empty
-      )}
-    </Card>
   );
 }
 export function RoutesPage(p: PolicyProps) {
@@ -1330,13 +1442,13 @@ export function RoutesPage(p: PolicyProps) {
       <Alert
         type="warning"
         showIcon
-        title="流式上传路径不会完整检查正文"
-        description="只有明确选择“流式上传”的路径才会边接收边回源。SSE 是响应流，不需要为了 SSE 关闭请求正文检查。"
+        title="流式上传不检查完整正文"
+        description="启用后，请求正文边接收边转发，仅检查请求头。SSE 可继续使用完整正文检查。"
       />
       <Card
         title="路径与流式策略"
         extra={
-          <Space>
+          <Space wrap>
             <SitePick {...p} />
             <Button
               icon={<PlusOutlined aria-hidden="true" />}
@@ -1381,11 +1493,6 @@ export function RoutesPage(p: PolicyProps) {
               },
               { title: "并发", dataIndex: "max_concurrent" },
               {
-                title: "HTML 挑战",
-                render: (_, r: RoutePolicy) =>
-                  r.allow_challenge ? "允许" : "不展示",
-              },
-              {
                 title: "操作",
                 render: (_, r: RoutePolicy, i: number) => (
                   <Space>
@@ -1425,12 +1532,12 @@ export function RoutesPage(p: PolicyProps) {
         onOk={() => void save()}
         okText="保存到草稿"
       >
-        <Form form={form} layout="vertical">
+        <Form name="route-policy" form={form} layout="vertical">
           <Form.Item
             name="path_prefix"
             label="路径前缀"
             rules={[{ required: true }]}
-            extra="按最长前缀匹配。未匹配路径使用默认 8 MiB 完整检查策略。"
+            extra="优先匹配最长前缀。未匹配时完整检查正文，上限 8 MiB。"
           >
             <Input placeholder="/upload/" />
           </Form.Item>
@@ -1457,7 +1564,7 @@ export function RoutesPage(p: PolicyProps) {
             />
           </Form.Item>
           <Row gutter={20}>
-            <Col span={12}>
+            <Col xs={24} md={12}>
               <Form.Item
                 name="max_body_mib"
                 label="最大正文（MiB）"
@@ -1466,17 +1573,17 @@ export function RoutesPage(p: PolicyProps) {
                 <InputNumber min={0.001} max={1048576} />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col xs={24} md={12}>
               <Form.Item name="max_concurrent" label="最大并发">
                 <InputNumber min={1} max={8192} />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col xs={24} md={12}>
               <Form.Item name="idle_timeout_seconds" label="空闲超时（秒）">
                 <InputNumber min={1} max={86400} />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col xs={24} md={12}>
               <Form.Item
                 name="max_duration_seconds"
                 label="总时长上限（秒）"
@@ -1486,13 +1593,6 @@ export function RoutesPage(p: PolicyProps) {
               </Form.Item>
             </Col>
           </Row>
-          <Form.Item
-            name="allow_challenge"
-            label="允许为 HTML GET 展示挑战页"
-            valuePropName="checked"
-          >
-            <Switch />
-          </Form.Item>
         </Form>
       </Modal>
     </Space>

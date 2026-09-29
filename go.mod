@@ -5,6 +5,7 @@ go 1.27.0
 require (
 	cel.dev/cel-go v0.32.0
 	filippo.io/age v1.3.2
+	github.com/altcha-org/altcha-lib-go/v2 v2.0.0-20260923082747-352eeeca913a
 	github.com/caddyserver/certmagic v0.25.4
 	github.com/corazawaf/coraza-coreruleset/v4 v4.25.0
 	github.com/corazawaf/coraza/v3 v3.7.0
