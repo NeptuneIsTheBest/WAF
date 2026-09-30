@@ -1,14 +1,14 @@
-name: ci
+name: Quality Checks
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: quality-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 jobs:
   source-checks:
@@ -185,32 +185,3 @@ jobs:
               raise SystemExit(1)
           print("All required checks passed.")
           PY
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: verify
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: release
-          path: release
-      - run: python3 scripts/check-publication.py --release release
-      - name: Publish verified release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
-          Linux amd64 / arm64 安装包，内置中文管理后台。
-
-          支持 Ubuntu 22.04+ / Debian 12+，使用 systemd 管理服务。
-          下载 install.sh 后执行 sudo bash install.sh，按提示填写域名、邮箱、密码和 Cloudflare Token。
-          保存初始化时显示的 TOTP 密钥及恢复码。
-
-          安装包和安装脚本的 SHA-256 校验值见 SHA256SUMS。
-          NOTES
-          gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/SHA256SUMS release/install.sh \
-            --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md" --latest
