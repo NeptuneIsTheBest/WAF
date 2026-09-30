@@ -1,0 +1,187 @@
+name: Quality Checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+concurrency:
+  group: quality-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+jobs:
+  source-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check publication contents
+        run: python3 scripts/check-publication.py --source
+      - name: Scan credentials
+        run: |
+          curl -fsSL --retry 3 https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o "$RUNNER_TEMP/gitleaks_8.30.1_linux_x64.tar.gz"
+          curl -fsSL --retry 3 https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_checksums.txt -o "$RUNNER_TEMP/gitleaks-checksums.txt"
+          (cd "$RUNNER_TEMP" && sha256sum --check --ignore-missing gitleaks-checksums.txt)
+          tar -xzf "$RUNNER_TEMP/gitleaks_8.30.1_linux_x64.tar.gz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git --redact --no-banner --log-opts=--all .
+      - name: Check installation scripts
+        run: |
+          if ! command -v shellcheck >/dev/null; then sudo apt-get update && sudo apt-get install -y shellcheck; fi
+          make scripts-check
+  go-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go
+        with:
+          cache-scope: ${{ github.job }}
+      - name: Check generated OpenAPI
+        run: |
+          make schema
+          changes="$(git status --porcelain=v1 --untracked-files=all --ignored -- internal/admin/openapi.json)"
+          if [[ -n "$changes" ]]; then
+            printf '%s\n' "$changes"
+            echo '::error::OpenAPI is out of date. Run make schema and commit the generated file.'
+            exit 1
+          fi
+      - name: Run Go unit tests
+        run: make test
+      - name: Run Go fuzz tests
+        run: make fuzz
+      - name: Check Go code
+        run: go vet ./...
+      - name: Scan Go dependencies
+        run: go tool govulncheck ./...
+  race:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go
+        with:
+          cache-scope: ${{ github.job }}
+      - name: Run Go race tests
+        run: make race
+  web-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go
+        with:
+          cache-scope: ${{ github.job }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build and typecheck frontend
+        run: make web
+      - name: Check generated frontend
+        run: |
+          changes="$(git status --porcelain=v1 --untracked-files=all --ignored -- web/dist)"
+          if [[ -n "$changes" ]]; then
+            printf '%s\n' "$changes"
+            echo '::error::Frontend assets are out of date. Run make web and commit the generated files.'
+            exit 1
+          fi
+      - name: Scan frontend dependencies
+        run: cd web && npm audit --omit=dev
+      - name: Install Chromium
+        run: cd web && npx playwright install --with-deps chromium
+      - name: Run browser tests
+        run: make e2e
+      - name: Upload browser test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-diagnostics
+          path: |
+            web/playwright-report/
+            web/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-go
+        with:
+          cache-scope: ${{ github.job }}
+      # Generated assets are committed; their rebuild checks gate publication in verify.
+      - name: Build clean release packages
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            make release VERSION="${GITHUB_REF_NAME#v}"
+          else
+            make release
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            release/*.tar.gz
+            release/SHA256SUMS
+            release/install.sh
+  install:
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-24.04-arm]
+        image: ['ubuntu:22.04', 'debian:12']
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+      - name: Build disposable systemd environment
+        run: docker build --build-arg WAF_IMAGE='${{ matrix.image }}' -t waf-install-test .github/systemd
+      - name: Test installation without production DNS credentials
+        run: |
+          docker run -d --name waf-install-test --privileged --cgroupns=host \
+            --tmpfs /run --tmpfs /run/lock --tmpfs /tmp:rw,nosuid,nodev,noexec \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" waf-install-test
+          for ((attempt=0; attempt<60; attempt++)); do
+            boot_state="$(docker exec waf-install-test systemctl is-system-running 2>/dev/null || true)"
+            case "$boot_state" in running|degraded) break ;; esac
+            sleep 1
+          done
+          case "$boot_state" in running|degraded) ;; *) docker logs waf-install-test; exit 1 ;; esac
+          docker exec -e CI=true waf-install-test bash /workspace/scripts/systemd-smoke.sh /workspace/release
+      - name: Remove disposable environment
+        if: always()
+        run: docker rm -f waf-install-test || true
+  verify:
+    if: always()
+    needs: [source-checks, go-checks, race, web-e2e, package, install]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every check to succeed
+        env:
+          NEEDS_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          results = json.loads(os.environ["NEEDS_RESULTS"])
+          failed = {name: job["result"] for name, job in results.items() if job["result"] != "success"}
+          for name, result in failed.items():
+              print(f"::error::{name}: {result}")
+          if not results or failed:
+              raise SystemExit(1)
+          print("All required checks passed.")
+          PY
