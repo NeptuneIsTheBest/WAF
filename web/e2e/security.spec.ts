@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import type { BrowserContext } from "@playwright/test";
+import type { BrowserContext, Page } from "@playwright/test";
 import { defaultSite, defaultSecurity } from "../src/types";
 import type { Draft, Session, Site, Security, CustomRule } from "../src/types";
 
@@ -58,12 +58,25 @@ function newSite(id: string): Site {
   };
 }
 
+async function saveDraft(page: Page) {
+  const saved = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/config/draft" &&
+      response.request().method() === "PUT",
+  );
+  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
+  const response = await saved;
+  expect(response.ok(), await response.text()).toBeTruthy();
+  await expect(page.getByText("草稿已保存", { exact: true })).toBeVisible();
+}
+
 test("global security editor handles scopes, overrides, events and read-only access", async ({
   page,
   context,
 }) => {
   const first = newSite("security-editor");
   const second = newSite("security-other");
+  const probePath = "/crs-probe-" + test.info().repeatEachIndex;
   test.setTimeout(120000);
   await addSite(context, first, defaultSecurity());
   await addSite(context, second);
@@ -156,10 +169,7 @@ test("global security editor handles scopes, overrides, events and read-only acc
   await managed.getByText("拦截", { exact: true }).click();
   await expect(managed.getByText("规则目录", { exact: true })).toBeVisible();
   await managed.getByRole("button", { name: "关闭", exact: true }).click();
-  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
-  await expect(
-    page.getByText("草稿已保存，尚未发布", { exact: true }),
-  ).toBeVisible();
+  await saveDraft(page);
   const saved: Draft = await (
     await context.request.get("/api/v1/config/draft")
   ).json();
@@ -198,10 +208,7 @@ test("global security editor handles scopes, overrides, events and read-only acc
   const siteEditor = page.getByRole("dialog");
   await siteEditor.getByLabel("显示名称", { exact: true }).fill("编辑后的网站");
   await siteEditor.getByRole("button", { name: "保存到草稿" }).click();
-  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
-  await expect(
-    page.getByText("草稿已保存，尚未发布", { exact: true }),
-  ).toBeVisible();
+  await saveDraft(page);
   const afterSite: Draft = await (
     await context.request.get("/api/v1/config/draft")
   ).json();
@@ -259,7 +266,7 @@ test("global security editor handles scopes, overrides, events and read-only acc
   await page.getByRole("menuitem", { name: "安全规则", exact: true }).click();
   expect(
     (
-      await context.request.get("http://127.0.0.1:18080/crs-probe", {
+      await context.request.get("http://127.0.0.1:18080" + probePath, {
         headers: { Host: first.domains[0], "User-Agent": "sqlmap" },
       })
     ).status(),
@@ -267,7 +274,8 @@ test("global security editor handles scopes, overrides, events and read-only acc
   await page.getByRole("menuitem", { name: "安全事件", exact: true }).click();
   const eventRow = page
     .getByRole("row")
-    .filter({ hasText: "/crs-probe" })
+    .filter({ has: page.getByText(probePath, { exact: true }) })
+    .filter({ has: page.getByText(first.id, { exact: true }) })
     .first();
   await expect
     .poll(async () => {
@@ -295,10 +303,7 @@ test("global security editor handles scopes, overrides, events and read-only acc
   await exceptionPolicy
     .getByRole("button", { name: "关闭", exact: true })
     .click();
-  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
-  await expect(
-    page.getByText("草稿已保存，尚未发布", { exact: true }),
-  ).toBeVisible();
+  await saveDraft(page);
   const withException: Draft = await (
     await context.request.get("/api/v1/config/draft")
   ).json();
@@ -306,7 +311,7 @@ test("global security editor handles scopes, overrides, events and read-only acc
     withException.bundle.security.managed.default.exclusions[0],
   ).toMatchObject({
     scope: { mode: "sites", site_ids: [first.id] },
-    path_prefix: "/crs-probe",
+    path_prefix: probePath,
     target: "REQUEST_HEADERS:User-Agent",
   });
   await page.getByRole("button", { name: "发布配置", exact: true }).click();
@@ -322,7 +327,7 @@ test("global security editor handles scopes, overrides, events and read-only acc
   ] as const) {
     expect(
       (
-        await context.request.get("http://127.0.0.1:18080/crs-probe", {
+        await context.request.get("http://127.0.0.1:18080" + probePath, {
           headers: { Host: site.domains[0], "User-Agent": "sqlmap" },
         })
       ).status(),
@@ -534,10 +539,7 @@ test("global rules can be prepared before adding any websites", async ({
     editor.getByRole("radio", { name: "所有网站（含新增网站）" }),
   ).toBeChecked();
   await editor.getByRole("button", { name: "保存到草稿" }).click();
-  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
-  await expect(
-    page.getByText("草稿已保存，尚未发布", { exact: true }),
-  ).toBeVisible();
+  await saveDraft(page);
   expect(draft.bundle.sites).toEqual([]);
   expect(draft.bundle.security.custom_rules[0].scope).toEqual({
     mode: "all",
