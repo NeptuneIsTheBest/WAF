@@ -80,13 +80,21 @@ sudo journalctl -u waf -f
 
 ## 安全规则与质询
 
-“安全规则”页面统一选择站点，下设自定义规则、速率限制规则和托管规则三个分区。自定义规则支持 Block、Skip、Log、Managed Challenge、Non-Interactive Challenge 和 Interactive Challenge。Skip 可以选择剩余自定义规则、全部速率限制规则、托管规则或指定规则，始终保留协议与资源限制。
+“安全规则”页面统一管理全局自定义规则、速率限制规则和托管规则，无需先选择站点，也可以在接入网站前准备规则。新规则默认“所有网站”，包括以后新增的网站；选择“指定网站”时必须至少保留一个有效网站。适用网站范围和 CEL 表达式需同时满足。表达式支持 `site.id`（实际路由命中的站点）、`request.host`、路径、请求头与客户端 IP。例如 `request.host == "api.example.com" && request.path.startsWith("/admin")`。条件构建器支持 `site.id`，样例验证也会检查网站范围；指定网站的样例须包含 `{"site":{"id":"网站标识"}}`。
 
-质询高级设置按规则独立保存：`work_factor` 默认 5000、允许 1000–20000；`clearance_seconds` 默认 1800 秒、允许 60–86400 秒。计算强度越高，浏览器耗时越长。每站点最多 16 条质询规则。生产环境验证需要 HTTPS；浏览器需要 JavaScript、Web Crypto 和 Web Worker。
+规则标识在同类全局列表内唯一。自定义规则按优先级数字升序执行，同优先级保持列表顺序；限流规则共享配置，但每个网站独立计算额度，同一站点的多个域名共享额度。网站被规则、覆盖策略或例外引用时，需先调整引用再移除网站，系统不会将空的网站选择自动扩大为全局。
+
+托管规则的全局默认是观察模式、PL1、阈值 5。覆盖策略按优先级数字升序选择首条匹配项，同优先级保持列表顺序；没有匹配时使用全局默认。新建覆盖策略复制当前默认的完整配置，随后独立保存，修改默认配置不会改动已有覆盖策略。每个请求只执行一套托管检测。覆盖策略的关闭模式只关闭其匹配请求的托管检测；表达式运行失败返回 503。
+
+托管例外可限定网站、路径前缀和参数，适用范围同时受所属策略约束。从安全事件添加例外会定位事件的托管策略（`managed_policy_id`，`default` 表示全局默认），默认限定原网站和路径；策略或网站已删除时需重新检查。全局规则目录的启用开关只管理该策略内适用于所有网站的整条检测规则例外。
+
+自定义规则支持 Block、Skip、Log、Managed Challenge、Non-Interactive Challenge 和 Interactive Challenge。Skip 可以选择剩余自定义规则、全部速率限制规则、托管规则或指定规则，始终保留协议与资源限制。
+
+质询高级设置按规则独立保存：`work_factor` 默认 5000、允许 1000–20000；`clearance_seconds` 默认 1800 秒、允许 60–86400 秒。计算强度越高，浏览器耗时越长。每站点按网站范围计算最多 200 条自定义规则、100 条限流规则，其中最多 16 条质询规则；禁用规则仍计入候选数量，表达式不用于绕过数量上限。全局最多 2000 条自定义规则、1000 条限流规则、200 条托管覆盖策略及 128 个不同托管检测实例。生产环境验证需要 HTTPS；浏览器需要 JavaScript、Web Crypto 和 Web Worker。
 
 Non-Interactive 自动计算，Interactive 点击复选框后计算，Managed 根据本地请求频率与失败记录选择方式。Managed 在令牌桶耗尽（每秒补充 2 个、容量 120）或 5 分钟内失败 3 次时选用交互模式。ALTCHA 是本地开源工作量验证，点击本身不构成不可伪造的人类身份证明；需要限制请求频率时，应同时配置速率限制规则。
 
-质询资源随 WAF 打包，不需要 ALTCHA 账号、密钥或额外服务。旧独立 Bot 模型、`challenge` 动作和路径级 `allow_challenge` 开关已移除，本版本不转换旧配置、历史版本或旧备份；使用新模型重新建立规则。可疑 User-Agent 用 CEL 的 `request.user_agent.matches(...)` 配置，频率阈值放入速率限制规则。
+质询资源随 WAF 打包，不需要 ALTCHA 账号、密钥或额外服务。旧独立 Bot 模型、`challenge` 动作和路径级 `allow_challenge` 开关已移除，本版本不转换旧配置、历史版本或旧备份；使用新模型重新建立规则。新的配置结构为 `{"sites":[],"security":{"custom_rules":[],"rate_limits":[],"managed":{"default":{"mode":"observe","paranoia":1,"threshold":5,"exclusions":[]},"overrides":[]}}}`。原 `sites[].rules`、`sites[].rate_limits` 和 `sites[].managed` 字段会被明确拒绝。升级前保留旧数据目录和备份，使用新的数据目录执行初始化，再重新录入站点和全局规则；程序不会自动清空旧数据库。新版结构内的草稿、发布、回滚和备份恢复流程保持一致。可疑 User-Agent 用 CEL 的 `request.user_agent.matches(...)` 配置，频率阈值放入速率限制规则。
 
 API、上传、SSE 和 WebSocket 命中质询时返回结构化 403，包含 `challenge_url`、`action` 和 `challenge_mode`。在相同客户端环境完成验证后，由调用方重试原请求。验证服务不会自动重发这些请求。安全事件保留具体 Action、规则 ID 和实际验证方式；质询静态资源不计入安全事件。
 

@@ -366,12 +366,13 @@ func (a *Handler) revisions(w http.ResponseWriter, r *http.Request) {
 func (a *Handler) evaluate(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Expression string         `json:"expression"`
+		Scope      config.Scope   `json:"scope"`
 		Sample     map[string]any `json:"sample"`
 	}
 	if !decode(w, r, &b) {
 		return
 	}
-	match, e := a.engine.ValidateExpression(b.Expression, b.Sample)
+	match, e := a.engine.ValidateExpression(b.Expression, b.Scope, b.Sample)
 	if e != nil {
 		fail(w, 400, e.Error())
 		return
@@ -591,7 +592,9 @@ func internal(w http.ResponseWriter, e error) {
 	fail(w, 500, "internal_error")
 }
 func storageError(w http.ResponseWriter, e error) {
-	if errors.Is(e, store.ErrConflict) {
+	if errors.Is(e, config.ErrUnsupportedConfiguration) {
+		fail(w, 400, e.Error())
+	} else if errors.Is(e, store.ErrConflict) {
 		fail(w, 409, e.Error())
 	} else if errors.Is(e, sql.ErrNoRows) {
 		fail(w, 404, "not_found")

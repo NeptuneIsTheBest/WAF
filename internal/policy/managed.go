@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"path/filepath"
@@ -30,10 +31,12 @@ type ManagedRule struct {
 var catalogOnce sync.Once
 var catalog []ManagedRule
 var catalogIDs map[int]bool
+var detectorIDs map[int]bool
 
 func Catalog() []ManagedRule {
 	catalogOnce.Do(func() {
 		catalogIDs = map[int]bool{}
+		detectorIDs = map[int]bool{}
 		idRE := regexp.MustCompile(`\bid:([0-9]+)`)
 		msgRE := regexp.MustCompile(`msg:'([^']*)'`)
 		tagRE := regexp.MustCompile(`tag:'([^']*)'`)
@@ -60,7 +63,7 @@ func Catalog() []ManagedRule {
 					end = indices[i+1][0]
 				}
 				chunk := text[m[0]:end]
-				r := ManagedRule{ID: id, Group: strings.TrimSuffix(filepath.Base(path), ".conf"), Tags: []string{}, Paranoia: 1, Tunable: Tunable(id)}
+				r := ManagedRule{ID: id, Group: strings.TrimSuffix(filepath.Base(path), ".conf"), Tags: []string{}, Paranoia: 1}
 				if msg := msgRE.FindStringSubmatch(chunk); len(msg) > 1 {
 					r.Message = msg[1]
 				}
@@ -70,6 +73,10 @@ func Catalog() []ManagedRule {
 						r.Paranoia, _ = strconv.Atoi(strings.TrimPrefix(tag[1], "paranoia-level/"))
 					}
 				}
+				// Phase guards and performance controls can share a detector's ID range.
+				// Only actual detector rules carry a diagnostic message in the bundled CRS.
+				r.Tunable = r.Message != "" && (id >= 910000 && id < 949000 || id >= 950000 && id < 959000)
+				detectorIDs[id] = r.Tunable
 				catalog = append(catalog, r)
 				catalogIDs[id] = true
 			}
@@ -81,7 +88,7 @@ func Catalog() []ManagedRule {
 }
 
 // Initialization, score evaluation and reporting rules are not detector exceptions.
-func Tunable(id int) bool { return id >= 910000 && id < 949000 || id >= 950000 && id < 959000 }
+func Tunable(id int) bool { Catalog(); return detectorIDs[id] }
 func Description(id int) string {
 	for _, rule := range Catalog() {
 		if rule.ID == id {
@@ -99,12 +106,40 @@ type CompiledRate struct {
 	Config     config.RateLimitPolicy
 	Expression *Expression
 }
-type Site struct {
-	Config  config.Site
-	Rules   []CompiledRule
-	Rates   []CompiledRate
-	Managed map[string]coraza.WAF
+type Managed struct {
+	ID       string
+	Config   config.ManagedPolicy
+	Profiles map[string]coraza.WAF
 }
+type CompiledManagedOverride struct {
+	Config     config.ManagedOverride
+	Expression *Expression
+	Managed    *Managed
+}
+type Site struct {
+	Config           config.Site
+	Rules            []CompiledRule
+	Rates            []CompiledRate
+	ManagedDefault   *Managed
+	ManagedOverrides []CompiledManagedOverride
+}
+
+func (s *Site) SelectManaged(ctx context.Context, data map[string]any) (*Managed, error) {
+	for _, o := range s.ManagedOverrides {
+		if !o.Config.Enabled {
+			continue
+		}
+		match, err := o.Expression.Eval(ctx, data)
+		if err != nil {
+			return nil, fmt.Errorf("managed override %s: %w", o.Config.ID, err)
+		}
+		if match {
+			return o.Managed, nil
+		}
+	}
+	return s.ManagedDefault, nil
+}
+
 type Compiled struct {
 	Sites []*Site
 	wafs  []coraza.WAF
@@ -126,56 +161,114 @@ func Compile(bundle config.Bundle, boot config.Bootstrap) (out *Compiled, err er
 		}
 	}()
 	Catalog()
+
 	shared := map[string]coraza.WAF{}
-	for _, cfg := range bundle.Sites {
-		s := &Site{Config: cfg, Managed: map[string]coraza.WAF{}}
-		for _, rule := range cfg.Rules {
-			p, e := CompileExpression(rule.Expression)
-			if e != nil {
-				return out, fmt.Errorf("site %s rule %s: %w", cfg.ID, rule.ID, e)
-			}
-			s.Rules = append(s.Rules, CompiledRule{Config: rule, Expression: p})
+	var rules []CompiledRule
+	var rates []CompiledRate
+	var overrides []CompiledManagedOverride
+	for _, rule := range bundle.Security.CustomRules {
+		p, e := CompileExpression(rule.Expression)
+		if e != nil {
+			return out, fmt.Errorf("custom rule %s: %w", rule.ID, e)
 		}
-		for _, rate := range cfg.RateLimits {
-			p, e := CompileExpression(rate.Expression)
-			if e != nil {
-				return out, fmt.Errorf("site %s rate %s: %w", cfg.ID, rate.ID, e)
-			}
-			s.Rates = append(s.Rates, CompiledRate{Config: rate, Expression: p})
+		rules = append(rules, CompiledRule{Config: rule, Expression: p})
+	}
+	for _, rate := range bundle.Security.RateLimits {
+		p, e := CompileExpression(rate.Expression)
+		if e != nil {
+			return out, fmt.Errorf("rate rule %s: %w", rate.ID, e)
 		}
-		for _, x := range cfg.Managed.Exclusions {
+		rates = append(rates, CompiledRate{Config: rate, Expression: p})
+	}
+	validateManaged := func(m config.ManagedPolicy) error {
+		for _, x := range m.Exclusions {
 			if !catalogIDs[x.RuleID] {
-				return out, fmt.Errorf("unknown CRS %s rule id %d", CRSVersion, x.RuleID)
+				return fmt.Errorf("unknown CRS %s rule id %d", CRSVersion, x.RuleID)
 			}
 			if !Tunable(x.RuleID) {
-				return out, fmt.Errorf("CRS control rule %d cannot be excluded; change the managed policy mode instead", x.RuleID)
+				return fmt.Errorf("CRS control rule %d cannot be excluded; change the managed policy mode instead", x.RuleID)
 			}
 		}
-		if cfg.Managed.Mode != "off" {
-			routes := append([]config.RoutePolicy{config.DefaultRoute()}, cfg.Routes...)
-			for _, route := range routes {
-				profile := Profile(route)
-				if _, ok := s.Managed[profile]; ok {
-					continue
-				}
-				directives := managedDirectives(cfg.Managed, route, filepath.Join(boot.DataDir, "tmp"))
-				w, ok := shared[directives]
-				if !ok {
-					if len(shared) >= 128 {
-						return out, fmt.Errorf("configuration exceeds 128 distinct managed inspection profiles")
-					}
-					w, err = coraza.NewWAF(coraza.NewWAFConfig().WithRootFS(crs.FS).WithDirectives(directives))
-					if err != nil {
-						return out, fmt.Errorf("site %s managed rules: %w", cfg.ID, err)
-					}
-					shared[directives] = w
-					out.wafs = append(out.wafs, w)
-				}
-				s.Managed[profile] = w
+		return nil
+	}
+	if err = validateManaged(bundle.Security.Managed.Default); err != nil {
+		return out, err
+	}
+	for _, o := range bundle.Security.Managed.Overrides {
+		p, e := CompileExpression(o.Expression)
+		if e != nil {
+			return out, fmt.Errorf("managed override %s: %w", o.ID, e)
+		}
+		if e = validateManaged(o.Policy); e != nil {
+			return out, e
+		}
+		overrides = append(overrides, CompiledManagedOverride{Config: o, Expression: p})
+	}
+	compileManaged := func(id string, m config.ManagedPolicy, site config.Site) (*Managed, error) {
+		effective := m
+		effective.Exclusions = nil
+		for _, x := range m.Exclusions {
+			if x.Scope.Matches(site.ID) {
+				effective.Exclusions = append(effective.Exclusions, x)
 			}
+		}
+		result := &Managed{ID: id, Config: effective, Profiles: map[string]coraza.WAF{}}
+		if m.Mode == "off" {
+			return result, nil
+		}
+		routes := append([]config.RoutePolicy{config.DefaultRoute()}, site.Routes...)
+		for _, route := range routes {
+			profile := Profile(route)
+			if _, ok := result.Profiles[profile]; ok {
+				continue
+			}
+			directives := managedDirectives(effective, route, filepath.Join(boot.DataDir, "tmp"))
+			w, ok := shared[directives]
+			if !ok {
+				if len(shared) >= 128 {
+					return nil, fmt.Errorf("configuration exceeds 128 distinct managed inspection profiles")
+				}
+				var e error
+				w, e = coraza.NewWAF(coraza.NewWAFConfig().WithRootFS(crs.FS).WithDirectives(directives))
+				if e != nil {
+					return nil, fmt.Errorf("site %s managed policy %s: %w", site.ID, id, e)
+				}
+				shared[directives] = w
+				out.wafs = append(out.wafs, w)
+			}
+			result.Profiles[profile] = w
+		}
+		return result, nil
+	}
+	for _, cfg := range bundle.Sites {
+		s := &Site{Config: cfg}
+		for _, rule := range rules {
+			if rule.Config.Scope.Matches(cfg.ID) {
+				s.Rules = append(s.Rules, rule)
+			}
+		}
+		for _, rate := range rates {
+			if rate.Config.Scope.Matches(cfg.ID) {
+				s.Rates = append(s.Rates, rate)
+			}
+		}
+		s.ManagedDefault, err = compileManaged("default", bundle.Security.Managed.Default, cfg)
+		if err != nil {
+			return out, err
+		}
+		for _, o := range overrides {
+			if !o.Config.Scope.Matches(cfg.ID) || !o.Config.Enabled {
+				continue
+			}
+			o.Managed, err = compileManaged(o.Config.ID, o.Config.Policy, cfg)
+			if err != nil {
+				return out, err
+			}
+			s.ManagedOverrides = append(s.ManagedOverrides, o)
 		}
 		out.Sites = append(out.Sites, s)
 	}
+
 	return out, nil
 }
 func managedDirectives(m config.ManagedPolicy, r config.RoutePolicy, tmp string) string {

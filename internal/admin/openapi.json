@@ -61,6 +61,9 @@
       "Bundle": {
         "additionalProperties": false,
         "properties": {
+          "security": {
+            "$ref": "#/components/schemas/Security"
+          },
           "sites": {
             "items": {
               "$ref": "#/components/schemas/Site"
@@ -72,7 +75,8 @@
           }
         },
         "required": [
-          "sites"
+          "sites",
+          "security"
         ],
         "type": "object"
       },
@@ -160,6 +164,7 @@
             "type": "boolean"
           },
           "expression": {
+            "description": "CEL predicate, ANDed with the site scope. Available variables: site.id (resolved by routing), request metadata, and client.ip.",
             "maxLength": 4096,
             "type": "string"
           },
@@ -172,6 +177,9 @@
           "priority": {
             "format": "int64",
             "type": "integer"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
           },
           "skip": {
             "description": "Explicit targets: custom_rules (remaining rules), rate_limits, managed, rule:\u003cid\u003e, rate:\u003cid\u003e. Protocol and resource limits always apply.",
@@ -259,6 +267,9 @@
           "sample": {
             "additionalProperties": true,
             "type": "object"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
           }
         },
         "required": [
@@ -307,6 +318,10 @@
             "type": "integer"
           },
           "inspection": {
+            "type": "string"
+          },
+          "managed_policy_id": {
+            "description": "Managed policy that produced a detector match; default identifies the global fallback. Omitted for non-managed events.",
             "type": "string"
           },
           "matched_rule_ids": {
@@ -361,6 +376,9 @@
             "format": "int64",
             "type": "integer"
           },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
           "target": {
             "description": "Optional ARGS:name, ARGS_NAMES:name, REQUEST_HEADERS:name or REQUEST_COOKIES:name. Control rules cannot be excluded.",
             "type": "string"
@@ -389,6 +407,43 @@
           "username",
           "password",
           "code"
+        ],
+        "type": "object"
+      },
+      "ManagedOverride": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "expression": {
+            "description": "CEL predicate, ANDed with the site scope. Available variables: site.id (resolved by routing), request metadata, and client.ip.",
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "id": {
+            "description": "Globally unique override ID; default is reserved for the fallback policy.",
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/ManagedPolicy"
+          },
+          "priority": {
+            "description": "Lower values execute first; ties keep list order. Only the first enabled matching override is used.",
+            "type": "integer"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          }
+        },
+        "required": [
+          "id",
+          "expression",
+          "policy"
         ],
         "type": "object"
       },
@@ -452,6 +507,24 @@
           },
           "tunable": {
             "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "ManagedSecurity": {
+        "additionalProperties": false,
+        "properties": {
+          "default": {
+            "$ref": "#/components/schemas/ManagedPolicy"
+          },
+          "overrides": {
+            "items": {
+              "$ref": "#/components/schemas/ManagedOverride"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           }
         },
         "type": "object"
@@ -561,12 +634,20 @@
             "type": "boolean"
           },
           "expression": {
+            "description": "CEL predicate, ANDed with the site scope. Available variables: site.id (resolved by routing), request metadata, and client.ip.",
+            "maxLength": 4096,
             "type": "string"
           },
           "id": {
             "type": "string"
           },
           "key": {
+            "description": "Counters are always isolated by site, even for an all-sites rule.",
+            "enum": [
+              "ip",
+              "site",
+              "ip_path"
+            ],
             "type": "string"
           },
           "name": {
@@ -574,6 +655,9 @@
           },
           "requests_per_second": {
             "type": "number"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
           }
         },
         "required": [
@@ -677,6 +761,58 @@
         ],
         "type": "object"
       },
+      "Scope": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "default": "all",
+            "description": "sites requires nonempty valid site_ids; all includes future sites and cannot contain site_ids.",
+            "enum": [
+              "all",
+              "sites"
+            ],
+            "type": "string"
+          },
+          "site_ids": {
+            "description": "Selected existing site IDs. Deleting a referenced site requires updating its scopes first.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "Security": {
+        "additionalProperties": false,
+        "properties": {
+          "custom_rules": {
+            "items": {
+              "$ref": "#/components/schemas/CustomRule"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "managed": {
+            "$ref": "#/components/schemas/ManagedSecurity"
+          },
+          "rate_limits": {
+            "items": {
+              "$ref": "#/components/schemas/RateLimitPolicy"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "SessionResponse": {
         "additionalProperties": false,
         "properties": {
@@ -726,9 +862,6 @@
             "pattern": "^[A-Za-z0-9_-]{1,64}$",
             "type": "string"
           },
-          "managed": {
-            "$ref": "#/components/schemas/ManagedPolicy"
-          },
           "max_connections_per_ip": {
             "format": "int64",
             "type": "integer"
@@ -736,30 +869,12 @@
           "name": {
             "type": "string"
           },
-          "rate_limits": {
-            "items": {
-              "$ref": "#/components/schemas/RateLimitPolicy"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
           "redirect_http": {
             "type": "boolean"
           },
           "routes": {
             "items": {
               "$ref": "#/components/schemas/RoutePolicy"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "rules": {
-            "items": {
-              "$ref": "#/components/schemas/CustomRule"
             },
             "type": [
               "array",
@@ -894,7 +1009,7 @@
     }
   },
   "info": {
-    "description": "All paths are relative to /api/v1 on the dedicated administration domain. Mutations require the session cookie, X-CSRF-Token and exact Origin. Body limit: 2 MiB. Site/rule resources are edited together through the versioned configuration draft. Development mode uses the waf_session_dev cookie on loopback HTTP.",
+    "description": "All paths are relative to /api/v1 on the dedicated administration domain. Mutations require the session cookie, X-CSRF-Token and exact Origin. Body limit: 2 MiB. Sites and global security policies are edited together through the versioned configuration draft. Development mode uses the waf_session_dev cookie on loopback HTTP.",
     "title": "WAF Administration API",
     "version": "0.1.0"
   },

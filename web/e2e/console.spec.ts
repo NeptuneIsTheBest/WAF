@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import type { Draft, Session } from "../src/types";
-import { defaultSite } from "../src/types";
+import { defaultSite, defaultSecurity } from "../src/types";
 
 async function expectPageFits(page: Page) {
   await expect
@@ -149,7 +149,7 @@ test("navigation closes on selection, escape, backdrop and desktop resize", asyn
       json: {
         version: 1,
         base_revision: 0,
-        bundle: { sites: [navigationSite] },
+        bundle: { sites: [navigationSite], security: defaultSecurity() },
       },
     }),
   );
@@ -251,17 +251,20 @@ test("browser solves multiple challenge scopes and backup API returns encrypted 
     { url: "http://127.0.0.1:18081", weight: 1, health_path: "" },
   ];
   site.domains = ["challenge.localhost"];
-  site.managed.mode = "block";
-  site.rules = [1, 2].map((n) => ({
-    id: `challenge-${n}`,
-    name: `Challenge ${n}`,
-    enabled: true,
-    priority: n,
-    expression: "true",
-    action: "non_interactive_challenge" as const,
-    challenge: { work_factor: 1000, clearance_seconds: 1800 },
-    skip: [],
-  }));
+  draft.bundle.security.managed.default.mode = "block";
+  draft.bundle.security.custom_rules.push(
+    ...[1, 2].map((n) => ({
+      scope: { mode: "sites" as const, site_ids: [site.id] },
+      id: `challenge-${n}`,
+      name: `Challenge ${n}`,
+      enabled: true,
+      priority: n,
+      expression: "true",
+      action: "non_interactive_challenge" as const,
+      challenge: { work_factor: 1000, clearance_seconds: 1800 },
+      skip: [],
+    })),
+  );
   draft.bundle.sites.push(site);
   const saved = await context.request.put("/api/v1/config/draft", {
     headers,

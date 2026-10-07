@@ -16,7 +16,13 @@ export interface Upstream {
   weight: number;
   health_path: string;
 }
+export interface Scope {
+  mode: "all" | "sites";
+  site_ids: string[];
+}
+export const allSites = (): Scope => ({ mode: "all", site_ids: [] });
 export interface Exclusion {
+  scope: Scope;
   rule_id: number;
   path_prefix: string;
   target: string;
@@ -43,6 +49,7 @@ export const isChallengeAction = (action: string) =>
     "interactive_challenge",
   ].includes(action);
 export interface CustomRule {
+  scope: Scope;
   id: string;
   name: string;
   enabled: boolean;
@@ -53,6 +60,7 @@ export interface CustomRule {
   skip: string[];
 }
 export interface RateLimit {
+  scope: Scope;
   id: string;
   name: string;
   enabled: boolean;
@@ -80,20 +88,83 @@ export interface Site {
   redirect_http: boolean;
   dns_credential: string;
   upstreams: Upstream[];
-  managed: {
-    mode: "off" | "observe" | "block";
-    paranoia: number;
-    threshold: number;
-    exclusions: Exclusion[];
-  };
-  rules: CustomRule[];
-  rate_limits: RateLimit[];
   routes: RoutePolicy[];
   max_connections_per_ip: number;
   websocket_origins: string[];
 }
+export interface ManagedPolicy {
+  mode: "off" | "observe" | "block";
+  paranoia: number;
+  threshold: number;
+  exclusions: Exclusion[];
+}
+export interface ManagedOverride {
+  id: string;
+  name: string;
+  enabled: boolean;
+  priority: number;
+  scope: Scope;
+  expression: string;
+  policy: ManagedPolicy;
+}
+export interface Security {
+  custom_rules: CustomRule[];
+  rate_limits: RateLimit[];
+  managed: { default: ManagedPolicy; overrides: ManagedOverride[] };
+}
 export interface Bundle {
   sites: Site[];
+  security: Security;
+}
+export const defaultManaged = (): ManagedPolicy => ({
+  mode: "observe",
+  paranoia: 1,
+  threshold: 5,
+  exclusions: [],
+});
+export const defaultSecurity = (): Security => ({
+  custom_rules: [],
+  rate_limits: [],
+  managed: { default: defaultManaged(), overrides: [] },
+});
+export const defaultBundle = (): Bundle => ({
+  sites: [],
+  security: defaultSecurity(),
+});
+export const scopeMatches = (scope: Scope, id: string) =>
+  scope.mode === "all" || scope.site_ids.includes(id);
+export function normalizeBundle(b: Bundle): Bundle {
+  const security = b.security || defaultSecurity();
+  const managed = (m: ManagedPolicy): ManagedPolicy => ({
+    ...m,
+    exclusions: (m.exclusions || []).map((x) => ({
+      ...x,
+      scope: { ...allSites(), ...x.scope, site_ids: x.scope?.site_ids || [] },
+    })),
+  });
+  const scoped = <T extends { scope: Scope }>(r: T): T => ({
+    ...r,
+    scope: { ...allSites(), ...r.scope, site_ids: r.scope?.site_ids || [] },
+  });
+  return {
+    ...b,
+    sites: (b.sites || []).map(normalizeSite),
+    security: {
+      ...security,
+      custom_rules: (security.custom_rules || []).map((r) => ({
+        ...scoped(r),
+        skip: r.skip || [],
+      })),
+      rate_limits: (security.rate_limits || []).map(scoped),
+      managed: {
+        default: managed(security.managed.default),
+        overrides: (security.managed.overrides || []).map((o) => ({
+          ...scoped(o),
+          policy: managed(o.policy),
+        })),
+      },
+    },
+  };
 }
 export interface Draft {
   base_revision: number;
@@ -135,6 +206,8 @@ export interface SecurityEvent {
   status: number;
   action: string;
   rule_id?: string;
+  managed_policy_id?: string;
+  matched_rule_ids?: number[];
   challenge_mode?: "non_interactive" | "interactive";
   message?: string;
   duration_ms: number;
@@ -180,9 +253,6 @@ export const defaultSite = (): Site => ({
   redirect_http: true,
   dns_credential: "cloudflare",
   upstreams: [{ url: "", weight: 1, health_path: "/health" }],
-  managed: { mode: "observe", paranoia: 1, threshold: 5, exclusions: [] },
-  rules: [],
-  rate_limits: [],
   routes: [defaultRoute()],
   max_connections_per_ip: 32,
   websocket_origins: [],
@@ -190,10 +260,7 @@ export const defaultSite = (): Site => ({
 export function normalizeSite(s: Site): Site {
   return {
     ...s,
-    rules: s.rules || [],
-    rate_limits: s.rate_limits || [],
     routes: s.routes || [],
     websocket_origins: s.websocket_origins || [],
-    managed: { ...s.managed, exclusions: s.managed.exclusions || [] },
   };
 }

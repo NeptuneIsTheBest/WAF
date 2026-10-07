@@ -26,6 +26,18 @@ func TestBackupRoundTripAndAuthentication(t *testing.T) {
 	if err = s.PutSecret("cloudflare", []byte("secret-marker"), "test"); err != nil {
 		t.Fatal(err)
 	}
+	d, err := s.Draft()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Bundle.Security.CustomRules = []config.CustomRule{{ID: "global", Enabled: true, Action: "log", Expression: "true", Scope: config.Scope{Mode: "all"}}}
+	d, err = s.SaveDraft(d, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Publish(d, "test", "4.25.0"); err != nil {
+		t.Fatal(err)
+	}
 	var encrypted bytes.Buffer
 	if err = Create(b, s, "backup test password", &encrypted); err != nil {
 		t.Fatal(err)
@@ -48,7 +60,11 @@ func TestBackupRoundTripAndAuthentication(t *testing.T) {
 		t.Fatal(err)
 	}
 	value, err := restored.Secret("cloudflare")
+	restoredRevision, revisionErr := restored.Active()
 	restored.Close()
+	if revisionErr != nil || len(restoredRevision.Bundle.Security.CustomRules) != 1 || restoredRevision.Bundle.Security.CustomRules[0].ID != "global" {
+		t.Fatalf("global security lost in backup: %+v %v", restoredRevision, revisionErr)
+	}
 	if err != nil || string(value) != "secret-marker" {
 		t.Fatal(err)
 	}

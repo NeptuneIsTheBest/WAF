@@ -126,8 +126,8 @@ func TestInvalidPublishKeepsActiveRevision(t *testing.T) {
 	site.HTTPS = false
 	site.RedirectHTTP = false
 	site.Upstreams = []config.Upstream{{URL: "http://127.0.0.1:3000", Weight: 1}}
-	site.Rules = []config.CustomRule{{ID: "broken", Enabled: true, Expression: "not valid CEL", Action: "block"}}
-	d.Bundle = config.Bundle{Sites: []config.Site{site}}
+	d.Bundle.Security.CustomRules = []config.CustomRule{{ID: "broken", Enabled: true, Expression: "not valid CEL", Action: "block"}}
+	d.Bundle.Sites = []config.Site{site}
 	w := f.request("PUT", "/config/draft", d, cookie, csrf)
 	if w.Code != 200 {
 		t.Fatalf("save: %s", w.Body.String())
@@ -137,7 +137,7 @@ func TestInvalidPublishKeepsActiveRevision(t *testing.T) {
 	if w.Code != 400 || f.engine.Revision() != 0 {
 		t.Fatalf("invalid publish %d rev %d", w.Code, f.engine.Revision())
 	}
-	d.Bundle.Sites[0].Rules[0].Expression = `request.path == "/blocked"`
+	d.Bundle.Security.CustomRules[0].Expression = `request.path == "/blocked"`
 	w = f.request("PUT", "/config/draft", d, cookie, csrf)
 	if w.Code != 200 {
 		t.Fatal(w.Body.String())
@@ -150,5 +150,63 @@ func TestInvalidPublishKeepsActiveRevision(t *testing.T) {
 	w = f.request("POST", "/config/publish", map[string]any{"version": d.Version, "base_revision": d.BaseRevision}, cookie, csrf)
 	if w.Code != 409 {
 		t.Fatal("stale publish accepted")
+	}
+}
+
+func TestGlobalSecurityDraftRollbackAndEvaluation(t *testing.T) {
+	f := setup(t, true)
+	cookie, csrf := f.login(t)
+	d, err := f.store.Draft()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Bundle.Security.CustomRules = []config.CustomRule{{ID: "global", Action: "log", Enabled: true, Expression: "true"}}
+	d.Bundle.Security.RateLimits = []config.RateLimitPolicy{{ID: "limit", Enabled: true, Expression: "false", Key: "ip", RequestsPerSecond: 10, Burst: 20}}
+	d.Bundle.Security.Managed.Overrides = []config.ManagedOverride{{ID: "observe", Enabled: true, Expression: `request.host == "example.com"`, Policy: config.DefaultManaged()}}
+	savePublish := func() {
+		t.Helper()
+		w := f.request("PUT", "/config/draft", d, cookie, csrf)
+		if w.Code != 200 {
+			t.Fatalf("save: %d %s", w.Code, w.Body.String())
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &d); err != nil {
+			t.Fatal(err)
+		}
+		w = f.request("POST", "/config/publish", map[string]any{"version": d.Version, "base_revision": d.BaseRevision}, cookie, csrf)
+		if w.Code != 200 {
+			t.Fatalf("publish: %d %s", w.Code, w.Body.String())
+		}
+		d, err = f.store.Draft()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	savePublish()
+	if d.Bundle.Security.CustomRules[0].Scope.Mode != "all" || len(d.Bundle.Security.Managed.Overrides) != 1 {
+		t.Fatal("global draft roundtrip")
+	}
+	d.Bundle.Security.CustomRules[0].Action = "block"
+	savePublish()
+	w := f.request("POST", "/config/rollback", map[string]any{"revision": 1, "version": d.Version, "base_revision": d.BaseRevision}, cookie, csrf)
+	if w.Code != 200 {
+		t.Fatalf("rollback: %d %s", w.Code, w.Body.String())
+	}
+	active, err := f.store.Active()
+	if err != nil || active.Bundle.Security.CustomRules[0].Action != "log" {
+		t.Fatal("rollback lost global security", err)
+	}
+	for _, site := range []string{"one", "two"} {
+		w = f.request("POST", "/rules/evaluate", map[string]any{"expression": "true", "scope": config.Scope{Mode: "sites", SiteIDs: []string{"one"}}, "sample": map[string]any{"site": map[string]any{"id": site}}}, cookie, csrf)
+		var result struct {
+			Matches bool `json:"matches"`
+		}
+		json.Unmarshal(w.Body.Bytes(), &result)
+		if w.Code != 200 || result.Matches != (site == "one") {
+			t.Fatalf("evaluate %s: %d %s", site, w.Code, w.Body.String())
+		}
+	}
+	w = f.request("POST", "/config/validate", map[string]any{"sites": []any{map[string]any{"id": "legacy", "rules": []any{}}}}, cookie, csrf)
+	if w.Code != 400 {
+		t.Fatal("legacy API configuration accepted")
 	}
 }

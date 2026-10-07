@@ -28,7 +28,7 @@ func TestExpressionsAndCostBudget(t *testing.T) {
 	if _, err = p.Eval(context.Background(), map[string]any{"request": map[string]any{"values": values}}); err == nil {
 		t.Fatal("unbounded CEL work")
 	}
-	if Tunable(949110) || Tunable(901001) || !Tunable(942100) {
+	if Tunable(949110) || Tunable(901001) || Tunable(911013) || Tunable(941010) || !Tunable(913100) || !Tunable(942100) {
 		t.Fatal("control rule tuning boundary")
 	}
 }

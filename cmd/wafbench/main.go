@@ -96,7 +96,11 @@ func main() {
 		}
 	}
 	if *configOut != "" {
-		bundle := config.Bundle{Sites: []config.Site{}}
+		bundle := config.DefaultBundle()
+		bundle.Security.Managed.Default.Mode = "block"
+		for j := 0; j < 10; j++ {
+			bundle.Security.CustomRules = append(bundle.Security.CustomRules, config.CustomRule{Scope: config.Scope{Mode: "all"}, ID: fmt.Sprintf("rule-%d", j), Name: "benchmark predicate", Enabled: true, Priority: j, Expression: fmt.Sprintf(`request.path.startsWith("/blocked-%d")`, j), Action: "block"})
+		}
 		for i, host := range hosts {
 			s := config.DefaultSite()
 			s.ID = fmt.Sprintf("bench-%02d", i+1)
@@ -105,10 +109,6 @@ func main() {
 			s.HTTPS = false
 			s.RedirectHTTP = false
 			s.Upstreams = []config.Upstream{{URL: *upstream, Weight: 1}}
-			s.Managed.Mode = "block"
-			for j := 0; j < 10; j++ {
-				s.Rules = append(s.Rules, config.CustomRule{ID: fmt.Sprintf("rule-%d", j), Name: "benchmark predicate", Enabled: true, Priority: j, Expression: fmt.Sprintf(`request.path.startsWith("/blocked-%d")`, j), Action: "block"})
-			}
 			bundle.Sites = append(bundle.Sites, s)
 		}
 		raw, _ := json.MarshalIndent(bundle, "", "  ")

@@ -131,3 +131,25 @@ func TestEventRetentionAndWriteFailure(t *testing.T) {
 		t.Fatal("write failure was not surfaced")
 	}
 }
+
+func TestLegacySecurityRejectedInDraftAndRevision(t *testing.T) {
+	s, boot := testStore(t)
+	legacy := `{"sites":[{"id":"old","managed":{"mode":"block"}}]}`
+	if _, err := s.DB.Exec(`UPDATE draft SET body=? WHERE id=1`, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Draft(); err == nil {
+		t.Fatal("legacy draft silently loaded")
+	}
+	if _, err := s.DB.Exec(`INSERT INTO revisions(id,created,actor,crs_version,body) VALUES(1,?,?,?,?)`, now(), "test", "4.25.0", legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Revision(1); err == nil {
+		t.Fatal("legacy revision silently loaded")
+	}
+	s.Close()
+	if reopened, err := Open(boot); err == nil {
+		reopened.Close()
+		t.Fatal("legacy backup or installation opened")
+	}
+}

@@ -22,14 +22,17 @@ import {
   Typography,
   message,
 } from "antd";
+import { PlusOutlined, DeleteOutlined, EditOutlined } from "@ant-design/icons";
 import {
-  PlusOutlined,
-  DeleteOutlined,
-  EditOutlined,
-  ExperimentOutlined,
-} from "@ant-design/icons";
+  MatchFields,
+  ScopeFields,
+  ScopeLabel,
+  cleanScope,
+} from "./SecurityFields";
 import { actionColor, api, ruleActionOptions } from "./api";
 import {
+  allSites,
+  scopeMatches,
   defaultChallenge,
   defaultRoute,
   defaultSite,
@@ -42,9 +45,19 @@ import type {
   RateLimit,
   RoutePolicy,
   Site,
+  Security,
+  ManagedPolicy,
+  ManagedOverride,
 } from "./types";
 const { Text, Paragraph } = Typography;
+export interface SecurityProps {
+  sites: Site[];
+  security: Security;
+  change: (security: Security) => void;
+  editable: boolean;
+}
 export interface PolicyProps {
+  security: Security;
   sites: Site[];
   selected: string;
   select: (id: string) => void;
@@ -157,13 +170,19 @@ export function SitesPage(p: PolicyProps) {
             {
               title: "托管防护",
               render: (_, s: Site) => (
-                <Tag color={s.managed.mode === "block" ? "success" : "warning"}>
-                  {
-                    { block: "拦截", observe: "观察", off: "关闭" }[
-                      s.managed.mode
-                    ]
-                  }
-                </Tag>
+                <Space orientation="vertical" size={0}>
+                  <Tag>
+                    全局默认 ·{" "}
+                    {
+                      { block: "拦截", observe: "观察", off: "关闭" }[
+                        p.security.managed.default.mode
+                      ]
+                    }
+                  </Tag>
+                  {p.security.managed.overrides.some(
+                    (o) => o.enabled && scopeMatches(o.scope, s.id),
+                  ) && <Text type="secondary">按请求条件覆盖</Text>}
+                </Space>
               ),
             },
             { title: "上游", render: (_, s: Site) => s.upstreams.length },
@@ -348,13 +367,84 @@ export function SitesPage(p: PolicyProps) {
   );
 }
 export function SecurityRulesPage(
-  p: PolicyProps & { managedRequest: number; onManagedClose: () => void },
+  p: SecurityProps & {
+    managedRequest: { id: string; nonce: number } | null;
+    onManagedClose: () => void;
+  },
 ) {
-  const { site } = useSite(p);
-  const [managedOpen, setManagedOpen] = useState(false);
+  const [managedID, setManagedID] = useState<string | null>(null);
+  const [overrideOpen, setOverrideOpen] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [form] = Form.useForm();
   useEffect(() => {
-    if (p.managedRequest > 0) setManagedOpen(true);
+    if (p.managedRequest) setManagedID(p.managedRequest.id);
   }, [p.managedRequest]);
+  const edit = (o?: ManagedOverride) => {
+    setEditing(o?.id || null);
+    form.resetFields();
+    form.setFieldsValue(
+      o
+        ? structuredClone(o)
+        : {
+            id: "",
+            name: "",
+            enabled: true,
+            priority: 100,
+            scope: allSites(),
+            expression: "true",
+          },
+    );
+    setOverrideOpen(true);
+  };
+  const saveOverride = async () => {
+    const v = await form.validateFields();
+    if (
+      !editing &&
+      (v.id === "default" ||
+        p.security.managed.overrides.some((o) => o.id === v.id))
+    ) {
+      message.error("策略标识已存在或为保留标识 default");
+      return;
+    }
+    const current = p.security.managed.overrides.find((o) => o.id === editing);
+    const next: ManagedOverride = {
+      ...v,
+      scope: cleanScope(v.scope),
+      policy: structuredClone(current?.policy || p.security.managed.default),
+    };
+    p.change({
+      ...p.security,
+      managed: {
+        ...p.security.managed,
+        overrides: editing
+          ? p.security.managed.overrides.map((o) =>
+              o.id === editing ? next : o,
+            )
+          : [...p.security.managed.overrides, next],
+      },
+    });
+    setOverrideOpen(false);
+    if (!editing) setManagedID(next.id);
+  };
+  const selectedPolicy =
+    managedID === "default"
+      ? p.security.managed.default
+      : p.security.managed.overrides.find((o) => o.id === managedID)?.policy;
+  const updatePolicy = (policy: ManagedPolicy) =>
+    p.change({
+      ...p.security,
+      managed:
+        managedID === "default"
+          ? { ...p.security.managed, default: policy }
+          : {
+              ...p.security.managed,
+              overrides: p.security.managed.overrides.map((o) =>
+                o.id === managedID ? { ...o, policy } : o,
+              ),
+            },
+    });
+  const modeLabel = (m: ManagedPolicy) =>
+    ({ block: "拦截", observe: "观察", off: "关闭" })[m.mode];
   return (
     <Space
       orientation="vertical"
@@ -364,96 +454,223 @@ export function SecurityRulesPage(
       <Card>
         <div className="security-rules-heading">
           <div>
-            <Text strong>统一管理站点防护</Text>
+            <Text strong>全局安全规则</Text>
             <Paragraph type="secondary">
-              按自定义规则、速率限制规则、托管规则的顺序执行。修改保存到草稿，发布后生效。
+              默认覆盖所有网站及以后新增的网站。可为每条规则指定网站并设置匹配条件。按自定义规则、速率限制、托管规则的顺序执行，发布后生效。
             </Paragraph>
           </div>
-          <SitePick {...p} />
         </div>
-        {site && (
-          <Space wrap>
-            <Tag>
-              自定义规则 {site.rules.filter((r) => r.enabled).length} /{" "}
-              {site.rules.length}
-            </Tag>
-            <Tag>
-              速率限制规则 {site.rate_limits.filter((r) => r.enabled).length} /{" "}
-              {site.rate_limits.length}
-            </Tag>
-            <Tag>托管规则 · OWASP CRS</Tag>
-          </Space>
-        )}
+        <Space wrap>
+          <Tag>
+            自定义规则 {p.security.custom_rules.filter((r) => r.enabled).length}{" "}
+            / {p.security.custom_rules.length}
+          </Tag>
+          <Tag>
+            速率限制规则{" "}
+            {p.security.rate_limits.filter((r) => r.enabled).length} /{" "}
+            {p.security.rate_limits.length}
+          </Tag>
+          <Tag>托管覆盖策略 {p.security.managed.overrides.length}</Tag>
+        </Space>
       </Card>
-      {site ? (
-        <>
-          <section aria-label="自定义规则">
-            <CustomPage {...p} />
-          </section>
-          <section aria-label="速率限制规则">
-            <RatePage {...p} />
-          </section>
-          <section aria-label="托管规则">
-            <Card
-              title="托管规则"
-              extra={
-                <Button onClick={() => setManagedOpen(true)}>
-                  配置托管规则
-                </Button>
-              }
+      <section aria-label="自定义规则">
+        <CustomPage {...p} />
+      </section>
+      <section aria-label="速率限制规则">
+        <RatePage {...p} />
+      </section>
+      <section aria-label="托管规则">
+        <Card
+          title="托管规则"
+          extra={
+            <Button onClick={() => setManagedID("default")}>
+              配置托管规则
+            </Button>
+          }
+        >
+          <Space orientation="vertical" className="full-width" size={16}>
+            <Space wrap>
+              <Text strong>OWASP CRS · 全局默认</Text>
+              <Tag>{modeLabel(p.security.managed.default)}</Tag>
+              <Tag>PL{p.security.managed.default.paranoia}</Tag>
+              <Tag>阈值 {p.security.managed.default.threshold}</Tag>
+              <Tag>例外 {p.security.managed.default.exclusions.length}</Tag>
+            </Space>
+            <Paragraph type="secondary">
+              覆盖策略按优先级数值从小到大匹配，只采用首条匹配的完整配置；同优先级保持列表顺序。没有命中时使用全局默认。新覆盖策略复制默认设置，之后独立保存。
+            </Paragraph>
+            <Button
+              disabled={!p.editable}
+              icon={<PlusOutlined />}
+              onClick={() => edit()}
             >
-              <Space orientation="vertical" size={12}>
-                <Space wrap>
-                  <Text strong>OWASP Core Rule Set</Text>
-                  <Tag
-                    color={
-                      site.managed.mode === "block"
-                        ? "green"
-                        : site.managed.mode === "observe"
-                          ? "orange"
-                          : "default"
-                    }
-                  >
-                    {site.managed.mode === "block"
-                      ? "拦截"
-                      : site.managed.mode === "observe"
-                        ? "观察"
-                        : "关闭"}
-                  </Tag>
-                </Space>
-                <Text type="secondary">
-                  检测 SQL 注入、跨站脚本等常见攻击。新站点默认观察模式。
-                </Text>
-                <Space wrap>
-                  <Tag>敏感等级 PL{site.managed.paranoia}</Tag>
-                  <Tag>异常分数阈值 {site.managed.threshold}</Tag>
-                  <Tag>规则例外 {site.managed.exclusions.length}</Tag>
-                </Space>
-              </Space>
-            </Card>
-          </section>
-          <Drawer
-            title="配置托管规则"
-            open={managedOpen}
-            size={1000}
-            destroyOnHidden
-            onClose={() => {
-              setManagedOpen(false);
-              p.onManagedClose();
-            }}
-          >
-            <ManagedPage {...p} />
-          </Drawer>
-        </>
-      ) : (
-        empty
-      )}
+              添加覆盖策略
+            </Button>
+            <Table
+              rowKey="id"
+              dataSource={[...p.security.managed.overrides].sort(
+                (a, b) => a.priority - b.priority,
+              )}
+              pagination={false}
+              scroll={{ x: 900 }}
+              columns={[
+                { title: "优先级", dataIndex: "priority" },
+                {
+                  title: "策略",
+                  render: (_, o: ManagedOverride) => o.name || o.id,
+                },
+                {
+                  title: "适用网站",
+                  render: (_, o: ManagedOverride) => (
+                    <ScopeLabel scope={o.scope} sites={p.sites} />
+                  ),
+                },
+                {
+                  title: "匹配条件",
+                  render: (_, o: ManagedOverride) => (
+                    <code className="expression-preview">{o.expression}</code>
+                  ),
+                },
+                {
+                  title: "模式",
+                  render: (_, o: ManagedOverride) => modeLabel(o.policy),
+                },
+                {
+                  title: "启用",
+                  render: (_, o: ManagedOverride) => (
+                    <Switch
+                      checked={o.enabled}
+                      disabled={!p.editable}
+                      onChange={(enabled) =>
+                        p.change({
+                          ...p.security,
+                          managed: {
+                            ...p.security.managed,
+                            overrides: p.security.managed.overrides.map((x) =>
+                              x.id === o.id ? { ...x, enabled } : x,
+                            ),
+                          },
+                        })
+                      }
+                    />
+                  ),
+                },
+                {
+                  title: "操作",
+                  render: (_, o: ManagedOverride) => (
+                    <Space>
+                      <Button
+                        size="small"
+                        disabled={!p.editable}
+                        onClick={() => edit(o)}
+                      >
+                        编辑条件
+                      </Button>
+                      <Button size="small" onClick={() => setManagedID(o.id)}>
+                        配置防护
+                      </Button>
+                      <Popconfirm
+                        title="移除此覆盖策略？"
+                        onConfirm={() =>
+                          p.change({
+                            ...p.security,
+                            managed: {
+                              ...p.security.managed,
+                              overrides: p.security.managed.overrides.filter(
+                                (x) => x.id !== o.id,
+                              ),
+                            },
+                          })
+                        }
+                      >
+                        <Button danger size="small" disabled={!p.editable}>
+                          移除
+                        </Button>
+                      </Popconfirm>
+                    </Space>
+                  ),
+                },
+              ]}
+            />
+          </Space>
+        </Card>
+      </section>
+      <Drawer
+        title={
+          managedID === "default"
+            ? "配置托管规则"
+            : `配置托管覆盖 · ${managedID}`
+        }
+        open={!!managedID && !!selectedPolicy}
+        size={1000}
+        destroyOnHidden
+        onClose={() => {
+          setManagedID(null);
+          p.onManagedClose();
+        }}
+      >
+        {selectedPolicy && (
+          <ManagedPage
+            key={managedID}
+            policy={selectedPolicy}
+            sites={p.sites}
+            editable={p.editable}
+            change={updatePolicy}
+          />
+        )}
+      </Drawer>
+      <Modal
+        title="托管覆盖策略"
+        open={overrideOpen}
+        width={900}
+        onCancel={() => setOverrideOpen(false)}
+        onOk={() =>
+          void saveOverride().catch((e) => {
+            if (e instanceof Error) message.error(e.message);
+          })
+        }
+        okText="保存到草稿"
+      >
+        <Form name="managed-override" form={form} layout="vertical">
+          <Row gutter={20}>
+            <Col xs={24} md={8}>
+              <Form.Item name="id" label="策略标识" rules={idRules}>
+                <Input disabled={!!editing} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={10}>
+              <Form.Item name="name" label="显示名称">
+                <Input />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={6}>
+              <Form.Item
+                name="priority"
+                label="优先级"
+                rules={[{ required: true }]}
+              >
+                <InputNumber min={0} max={100000} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <MatchFields sites={p.sites} form={form} />
+          <Form.Item name="enabled" label="启用" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+        </Form>
+      </Modal>
     </Space>
   );
 }
 
-export function ManagedPage(p: PolicyProps) {
-  const { site, update } = useSite(p);
+export function ManagedPage(p: {
+  policy: ManagedPolicy;
+  sites: Site[];
+  editable: boolean;
+  change: (policy: ManagedPolicy) => void;
+}) {
+  const managed = p.policy;
+  const update = p.change;
   const [rules, setRules] = useState<ManagedRule[]>([]);
   const [search, setSearch] = useState("");
   const [group, setGroup] = useState<string>();
@@ -465,18 +682,19 @@ export function ManagedPage(p: PolicyProps) {
       .catch((e) => message.error(e.message));
   }, []);
   const excluded = new Set(
-    site?.managed.exclusions
-      .filter((x) => !x.path_prefix && !x.target)
+    managed.exclusions
+      .filter((x) => x.scope.mode === "all" && !x.path_prefix && !x.target)
       .map((x) => x.rule_id),
   );
   const setExclusions = (exclusions: Exclusion[]) => {
-    if (site) update({ ...site, managed: { ...site.managed, exclusions } });
+    update({ ...managed, exclusions });
   };
   const addExclusion = async () => {
     const value = await form.validateFields();
     setExclusions([
-      ...(site?.managed.exclusions || []),
+      ...(managed.exclusions || []),
       {
+        scope: cleanScope(value.scope),
         rule_id: value.rule_id,
         path_prefix: value.path_prefix || "",
         target: value.target || "",
@@ -494,222 +712,221 @@ export function ManagedPage(p: PolicyProps) {
   return (
     <Space orientation="vertical" size={20} className="full-width">
       <Card title="OWASP CRS 设置">
-        {site ? (
-          <>
-            <Alert
-              type={site.managed.mode === "block" ? "success" : "warning"}
-              showIcon
-              title={
-                site.managed.mode === "block"
-                  ? "拦截模式：命中阈值时拒绝请求"
-                  : "观察或关闭模式不会执行托管规则拦截"
-              }
-              description="新站点默认观察模式。发现误报时，可按路径或参数添加例外；规则集随软件更新。"
-            />
-            <Row gutter={[24, 16]} className="form-top">
-              <Col xs={24} md={12}>
-                <Text strong>运行模式</Text>
-                <div className="form-top">
-                  <Radio.Group
-                    disabled={!p.editable}
-                    value={site.managed.mode}
-                    onChange={(e) =>
-                      update({
-                        ...site,
-                        managed: { ...site.managed, mode: e.target.value },
-                      })
-                    }
-                    options={[
-                      { label: "观察", value: "observe" },
-                      { label: "拦截", value: "block" },
-                      { label: "关闭", value: "off" },
-                    ]}
-                  />
-                </div>
-              </Col>
-              <Col xs={24} md={6}>
-                <Text strong>敏感等级</Text>
-                <div className="form-top">
-                  <Select
-                    disabled={!p.editable}
-                    value={site.managed.paranoia}
-                    onChange={(v) =>
-                      update({
-                        ...site,
-                        managed: { ...site.managed, paranoia: v },
-                      })
-                    }
-                    options={[1, 2, 3, 4].map((v) => ({
-                      value: v,
-                      label: `PL${v}`,
-                    }))}
-                  />
-                </div>
-              </Col>
-              <Col xs={24} md={6}>
-                <Text strong>异常分数阈值</Text>
-                <div className="form-top">
-                  <InputNumber
-                    disabled={!p.editable}
-                    min={1}
-                    max={100}
-                    value={site.managed.threshold}
-                    onChange={(v) =>
-                      update({
-                        ...site,
-                        managed: { ...site.managed, threshold: v || 5 },
-                      })
-                    }
-                  />
-                </div>
-              </Col>
-            </Row>
-          </>
-        ) : (
-          empty
-        )}
-      </Card>
-      {site && (
         <>
-          <Card
-            title="规则目录"
-            extra={
-              <div className="filter-bar">
-                <Select
-                  allowClear
-                  placeholder="全部分类"
-                  value={group}
-                  onChange={setGroup}
-                  style={{ width: 260 }}
-                  options={[...new Set(rules.map((r) => r.group))].map((g) => ({
-                    value: g,
-                    label: g,
-                  }))}
-                />
-                <Input.Search
-                  placeholder="规则 ID、说明或标签"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  style={{ width: 240 }}
+          <Alert
+            type={managed.mode === "block" ? "success" : "warning"}
+            showIcon
+            title={
+              managed.mode === "block"
+                ? "拦截模式：命中阈值时拒绝请求"
+                : "观察或关闭模式不会执行托管规则拦截"
+            }
+            description="托管配置按请求匹配结果生效。发现误报时，可按路径或参数添加例外；规则集随软件更新。"
+          />
+          <Row gutter={[24, 16]} className="form-top">
+            <Col xs={24} md={12}>
+              <Text strong>运行模式</Text>
+              <div className="form-top">
+                <Radio.Group
+                  disabled={!p.editable}
+                  value={managed.mode}
+                  onChange={(e) => update({ ...managed, mode: e.target.value })}
+                  options={[
+                    { label: "观察", value: "observe" },
+                    { label: "拦截", value: "block" },
+                    { label: "关闭", value: "off" },
+                  ]}
                 />
               </div>
-            }
-          >
-            <Table
-              rowKey="id"
-              size="small"
-              dataSource={filtered}
-              pagination={{ pageSize: 15, showSizeChanger: false }}
-              scroll={{ x: 750 }}
-              columns={[
-                { title: "ID", dataIndex: "id", width: 95 },
-                {
-                  title: "检测说明",
-                  render: (_, r: ManagedRule) => (
-                    <Space orientation="vertical" size={2}>
-                      <span>{r.message || r.group}</span>
-                      <Text type="secondary" className="small">
-                        {r.group}
-                      </Text>
-                    </Space>
-                  ),
-                },
-                {
-                  title: "等级",
-                  render: (_, r: ManagedRule) => <Tag>PL{r.paranoia}</Tag>,
-                  width: 75,
-                },
-                {
-                  title: "全局启用",
-                  width: 100,
-                  render: (_, r: ManagedRule) => (
-                    <Switch
-                      size="small"
-                      disabled={!p.editable || !r.tunable}
-                      checked={!excluded.has(r.id)}
-                      onChange={(on) =>
-                        setExclusions(
-                          on
-                            ? site.managed.exclusions.filter(
-                                (x) =>
-                                  !(
-                                    x.rule_id === r.id &&
-                                    !x.path_prefix &&
-                                    !x.target
-                                  ),
-                              )
-                            : [
-                                ...site.managed.exclusions,
-                                { rule_id: r.id, path_prefix: "", target: "" },
-                              ],
-                        )
-                      }
-                    />
-                  ),
-                },
-              ]}
-            />
-          </Card>
-          <Card
-            title="规则例外"
-            extra={
-              <Button
-                disabled={!p.editable}
-                icon={<PlusOutlined aria-hidden="true" />}
-                onClick={() => {
-                  form.resetFields();
-                  setOpen(true);
-                }}
-              >
-                添加例外
-              </Button>
-            }
-          >
-            <Table
-              rowKey={(_, i) => String(i)}
-              dataSource={site.managed.exclusions}
-              pagination={{ pageSize: 10 }}
-              scroll={{ x: 550 }}
-              columns={[
-                { title: "规则 ID", dataIndex: "rule_id" },
-                {
-                  title: "路径前缀",
-                  render: (_, x: Exclusion) => x.path_prefix || "全部路径",
-                },
-                {
-                  title: "限定参数",
-                  render: (_, x: Exclusion) => x.target || "整条规则",
-                },
-                {
-                  title: "操作",
-                  render: (_, x: Exclusion, i: number) => (
-                    <Button
-                      danger
-                      size="small"
-                      disabled={!p.editable}
-                      onClick={() =>
-                        setExclusions(
-                          site.managed.exclusions.filter((_, j) => i !== j),
-                        )
-                      }
-                    >
-                      移除
-                    </Button>
-                  ),
-                },
-              ]}
-            />
-          </Card>
+            </Col>
+            <Col xs={24} md={6}>
+              <Text strong>敏感等级</Text>
+              <div className="form-top">
+                <Select
+                  disabled={!p.editable}
+                  value={managed.paranoia}
+                  onChange={(v) => update({ ...managed, paranoia: v })}
+                  options={[1, 2, 3, 4].map((v) => ({
+                    value: v,
+                    label: `PL${v}`,
+                  }))}
+                />
+              </div>
+            </Col>
+            <Col xs={24} md={6}>
+              <Text strong>异常分数阈值</Text>
+              <div className="form-top">
+                <InputNumber
+                  disabled={!p.editable}
+                  min={1}
+                  max={100}
+                  value={managed.threshold}
+                  onChange={(v) => update({ ...managed, threshold: v || 5 })}
+                />
+              </div>
+            </Col>
+          </Row>
         </>
-      )}
+      </Card>
+
+      <>
+        <Card
+          title="规则目录"
+          extra={
+            <div className="filter-bar">
+              <Select
+                allowClear
+                placeholder="全部分类"
+                value={group}
+                onChange={setGroup}
+                style={{ width: 260 }}
+                options={[...new Set(rules.map((r) => r.group))].map((g) => ({
+                  value: g,
+                  label: g,
+                }))}
+              />
+              <Input.Search
+                placeholder="规则 ID、说明或标签"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                style={{ width: 240 }}
+              />
+            </div>
+          }
+        >
+          <Table
+            rowKey="id"
+            size="small"
+            dataSource={filtered}
+            pagination={{ pageSize: 15, showSizeChanger: false }}
+            scroll={{ x: 750 }}
+            columns={[
+              { title: "ID", dataIndex: "id", width: 95 },
+              {
+                title: "检测说明",
+                render: (_, r: ManagedRule) => (
+                  <Space orientation="vertical" size={2}>
+                    <span>{r.message || r.group}</span>
+                    <Text type="secondary" className="small">
+                      {r.group}
+                    </Text>
+                  </Space>
+                ),
+              },
+              {
+                title: "等级",
+                render: (_, r: ManagedRule) => <Tag>PL{r.paranoia}</Tag>,
+                width: 75,
+              },
+              {
+                title: "全局启用",
+                width: 100,
+                render: (_, r: ManagedRule) => (
+                  <Switch
+                    size="small"
+                    disabled={!p.editable || !r.tunable}
+                    checked={!excluded.has(r.id)}
+                    onChange={(on) =>
+                      setExclusions(
+                        on
+                          ? managed.exclusions.filter(
+                              (x) =>
+                                !(
+                                  x.scope.mode === "all" &&
+                                  x.rule_id === r.id &&
+                                  !x.path_prefix &&
+                                  !x.target
+                                ),
+                            )
+                          : [
+                              ...managed.exclusions,
+                              {
+                                scope: allSites(),
+                                rule_id: r.id,
+                                path_prefix: "",
+                                target: "",
+                              },
+                            ],
+                      )
+                    }
+                  />
+                ),
+              },
+            ]}
+          />
+        </Card>
+        <Card
+          title="规则例外"
+          extra={
+            <Button
+              disabled={!p.editable}
+              icon={<PlusOutlined aria-hidden="true" />}
+              onClick={() => {
+                form.resetFields();
+                form.setFieldsValue({ scope: allSites() });
+                setOpen(true);
+              }}
+            >
+              添加例外
+            </Button>
+          }
+        >
+          <Table
+            rowKey={(_, i) => String(i)}
+            dataSource={managed.exclusions}
+            pagination={{ pageSize: 10 }}
+            scroll={{ x: 550 }}
+            columns={[
+              { title: "规则 ID", dataIndex: "rule_id" },
+              {
+                title: "适用网站",
+                render: (_, x: Exclusion) => (
+                  <ScopeLabel scope={x.scope} sites={p.sites} />
+                ),
+              },
+              {
+                title: "路径前缀",
+                render: (_, x: Exclusion) => x.path_prefix || "全部路径",
+              },
+              {
+                title: "限定参数",
+                render: (_, x: Exclusion) => x.target || "整条规则",
+              },
+              {
+                title: "操作",
+                render: (_, x: Exclusion) => (
+                  <Button
+                    danger
+                    size="small"
+                    disabled={!p.editable}
+                    onClick={() =>
+                      setExclusions(
+                        managed.exclusions.filter((item) => item !== x),
+                      )
+                    }
+                  >
+                    移除
+                  </Button>
+                ),
+              },
+            ]}
+          />
+        </Card>
+      </>
+
       <Modal
         title="添加规则例外"
         open={open}
         onCancel={() => setOpen(false)}
-        onOk={() => void addExclusion()}
+        onOk={() =>
+          void addExclusion().catch((e) => {
+            if (e instanceof Error) message.error(e.message);
+          })
+        }
         okText="加入草稿"
       >
         <Form name="managed-exclusion" form={form} layout="vertical">
+          <ScopeFields sites={p.sites} />
           <Form.Item
             name="rule_id"
             label="规则 ID"
@@ -741,19 +958,12 @@ export function ManagedPage(p: PolicyProps) {
     </Space>
   );
 }
-export function CustomPage(p: PolicyProps) {
-  const { site, update } = useSite(p);
+export function CustomPage(p: SecurityProps) {
+  const security = p.security;
+  const update = p.change;
   const [open, setOpen] = useState(false);
   const [index, setIndex] = useState(-1);
   const [form] = Form.useForm();
-  const [conditions, setConditions] = useState([
-    { field: "request.path", op: "startsWith", value: "/admin" },
-  ]);
-  const [logic, setLogic] = useState("&&");
-  const [checking, setChecking] = useState(false);
-  const [sample, setSample] = useState(
-    '{"client":{"ip":"192.0.2.1"},"request":{"method":"GET","path":"/admin","host":"example.com","headers":{},"query":{},"user_agent":"Mozilla/5.0","protocol":"HTTP/2.0","tls":true}}',
-  );
   const openEditor = (r?: CustomRule, i = -1) => {
     setIndex(i);
     form.resetFields();
@@ -764,6 +974,7 @@ export function CustomPage(p: PolicyProps) {
             challenge: r.challenge || defaultChallenge(),
           }
         : {
+            scope: allSites(),
             id: "",
             name: "",
             enabled: true,
@@ -777,12 +988,12 @@ export function CustomPage(p: PolicyProps) {
     setOpen(true);
   };
   const save = async () => {
-    if (!site) return;
     const values = await form.validateFields();
+    values.scope = cleanScope(values.scope);
     if (!isChallengeAction(values.action)) delete values.challenge;
     else values.challenge = { ...defaultChallenge(), ...values.challenge };
     if (values.action !== "skip") values.skip = [];
-    const rules = [...site.rules];
+    const rules = [...security.custom_rules];
     if (index < 0) {
       if (rules.some((r) => r.id === values.id)) {
         message.error("规则标识已存在");
@@ -792,43 +1003,8 @@ export function CustomPage(p: PolicyProps) {
     } else {
       rules[index] = values;
     }
-    update({ ...site, rules });
+    update({ ...security, custom_rules: rules });
     setOpen(false);
-  };
-  const generate = () => {
-    const text = conditions
-      .map((c) => {
-        const value = JSON.stringify(c.value);
-        if (c.op === "in_cidr") return `in_cidr(${c.field}, ${value})`;
-        if (c.op === "eq") return `${c.field} == ${value}`;
-        if (c.op === "ne") return `${c.field} != ${value}`;
-        return `${c.field}.${c.op}(${value})`;
-      })
-      .map((c) => `(${c})`)
-      .join(` ${logic} `);
-    form.setFieldValue("expression", text);
-  };
-  const check = async () => {
-    setChecking(true);
-    try {
-      const result = await api<{ matches: boolean }>(
-        "/rules/evaluate",
-        "POST",
-        {
-          expression: form.getFieldValue("expression"),
-          sample: JSON.parse(sample),
-        },
-      );
-      message.success(
-        result.matches
-          ? "表达式有效，样例请求匹配"
-          : "表达式有效，样例请求不匹配",
-      );
-    } catch (e) {
-      message.error((e as Error).message);
-    } finally {
-      setChecking(false);
-    }
   };
   return (
     <>
@@ -839,7 +1015,7 @@ export function CustomPage(p: PolicyProps) {
             <Button
               type="primary"
               icon={<PlusOutlined aria-hidden="true" />}
-              disabled={!site || !p.editable}
+              disabled={!p.editable}
               onClick={() => openEditor()}
             >
               添加自定义规则
@@ -847,109 +1023,117 @@ export function CustomPage(p: PolicyProps) {
           </Space>
         }
       >
-        {site ? (
-          <>
-            <Paragraph type="secondary">
-              优先级数值越小，规则越先执行。跳过操作只作用于所选检查，协议和资源限制仍然生效。
-            </Paragraph>
-            <Table
-              dataSource={[...site.rules].sort(
-                (a, b) => a.priority - b.priority,
-              )}
-              rowKey="id"
-              pagination={false}
-              scroll={{ x: 850 }}
-              columns={[
-                { title: "优先级", dataIndex: "priority", width: 80 },
-                {
-                  title: "名称",
-                  render: (_, r: CustomRule) => (
-                    <Space orientation="vertical" size={0}>
-                      <Text strong>{r.name || r.id}</Text>
-                      <Text type="secondary">{r.id}</Text>
-                    </Space>
-                  ),
-                },
-                {
-                  title: "表达式",
-                  render: (_, r: CustomRule) => (
-                    <code className="expression-preview">{r.expression}</code>
-                  ),
-                },
-                {
-                  title: "动作",
-                  dataIndex: "action",
-                  render: (v: string) => (
-                    <Tag color={actionColor[v]}>
-                      {ruleActionOptions
-                        .find((option) => option.value === v)
-                        ?.label.split(" · ")[0] || v}
-                    </Tag>
-                  ),
-                },
-                {
-                  title: "启用",
-                  render: (_, r: CustomRule) => (
-                    <Switch
+        <>
+          <Paragraph type="secondary">
+            优先级数值越小，规则越先执行。跳过操作只作用于所选检查，协议和资源限制仍然生效。
+          </Paragraph>
+          <Table
+            dataSource={[...security.custom_rules].sort(
+              (a, b) => a.priority - b.priority,
+            )}
+            rowKey="id"
+            pagination={false}
+            scroll={{ x: 850 }}
+            columns={[
+              { title: "优先级", dataIndex: "priority", width: 80 },
+              {
+                title: "适用网站",
+                render: (_, r: CustomRule) => (
+                  <ScopeLabel scope={r.scope} sites={p.sites} />
+                ),
+              },
+              {
+                title: "名称",
+                render: (_, r: CustomRule) => (
+                  <Space orientation="vertical" size={0}>
+                    <Text strong>{r.name || r.id}</Text>
+                    <Text type="secondary">{r.id}</Text>
+                  </Space>
+                ),
+              },
+              {
+                title: "表达式",
+                render: (_, r: CustomRule) => (
+                  <code className="expression-preview">{r.expression}</code>
+                ),
+              },
+              {
+                title: "动作",
+                dataIndex: "action",
+                render: (v: string) => (
+                  <Tag color={actionColor[v]}>
+                    {ruleActionOptions
+                      .find((option) => option.value === v)
+                      ?.label.split(" · ")[0] || v}
+                  </Tag>
+                ),
+              },
+              {
+                title: "启用",
+                render: (_, r: CustomRule) => (
+                  <Switch
+                    size="small"
+                    disabled={!p.editable}
+                    checked={r.enabled}
+                    onChange={(enabled) =>
+                      update({
+                        ...security,
+                        custom_rules: security.custom_rules.map((x) =>
+                          x.id === r.id ? { ...x, enabled } : x,
+                        ),
+                      })
+                    }
+                  />
+                ),
+              },
+              {
+                title: "操作",
+                render: (_, r: CustomRule) => (
+                  <Space>
+                    <Button
                       size="small"
                       disabled={!p.editable}
-                      checked={r.enabled}
-                      onChange={(enabled) =>
+                      onClick={() =>
+                        openEditor(
+                          r,
+                          security.custom_rules.findIndex((x) => x.id === r.id),
+                        )
+                      }
+                    >
+                      编辑
+                    </Button>
+                    <Popconfirm
+                      title="移除此规则？"
+                      onConfirm={() =>
                         update({
-                          ...site,
-                          rules: site.rules.map((x) =>
-                            x.id === r.id ? { ...x, enabled } : x,
+                          ...security,
+                          custom_rules: security.custom_rules.filter(
+                            (x) => x.id !== r.id,
                           ),
                         })
                       }
-                    />
-                  ),
-                },
-                {
-                  title: "操作",
-                  render: (_, r: CustomRule) => (
-                    <Space>
-                      <Button
-                        size="small"
-                        disabled={!p.editable}
-                        onClick={() =>
-                          openEditor(
-                            r,
-                            site.rules.findIndex((x) => x.id === r.id),
-                          )
-                        }
-                      >
-                        编辑
+                    >
+                      <Button danger size="small" disabled={!p.editable}>
+                        移除
                       </Button>
-                      <Popconfirm
-                        title="移除此规则？"
-                        onConfirm={() =>
-                          update({
-                            ...site,
-                            rules: site.rules.filter((x) => x.id !== r.id),
-                          })
-                        }
-                      >
-                        <Button danger size="small" disabled={!p.editable}>
-                          移除
-                        </Button>
-                      </Popconfirm>
-                    </Space>
-                  ),
-                },
-              ]}
-            />
-          </>
-        ) : (
-          empty
-        )}
+                    </Popconfirm>
+                  </Space>
+                ),
+              },
+            ]}
+          />
+        </>
       </Card>
       <Modal
         title="自定义规则"
         open={open}
         width={900}
         onCancel={() => setOpen(false)}
-        onOk={() => void save()}
+        onOk={() =>
+          void save().catch((e) => {
+            if (e instanceof Error) message.error(e.message);
+          })
+        }
         okText="保存到草稿"
       >
         <Form name="custom-rule" form={form} layout="vertical">
@@ -970,114 +1154,7 @@ export function CustomPage(p: PolicyProps) {
               </Form.Item>
             </Col>
           </Row>
-          <Card
-            size="small"
-            title="条件构建器"
-            extra={
-              <Select
-                value={logic}
-                onChange={setLogic}
-                options={[
-                  { value: "&&", label: "全部满足" },
-                  { value: "||", label: "任意满足" },
-                ]}
-              />
-            }
-          >
-            {conditions.map((c, i) => (
-              <Row gutter={[8, 8]} key={i} className="condition-row">
-                <Col xs={24} md={8}>
-                  <Select
-                    className="full-width"
-                    value={c.field}
-                    onChange={(field) =>
-                      setConditions(
-                        conditions.map((x, j) =>
-                          i === j ? { ...x, field } : x,
-                        ),
-                      )
-                    }
-                    options={[
-                      "client.ip",
-                      "request.host",
-                      "request.method",
-                      "request.path",
-                      "request.user_agent",
-                      "request.protocol",
-                    ].map((x) => ({ value: x, label: x }))}
-                  />
-                </Col>
-                <Col xs={24} md={6}>
-                  <Select
-                    className="full-width"
-                    value={c.op}
-                    onChange={(op) =>
-                      setConditions(
-                        conditions.map((x, j) => (i === j ? { ...x, op } : x)),
-                      )
-                    }
-                    options={[
-                      ["eq", "等于"],
-                      ["ne", "不等于"],
-                      ["contains", "包含"],
-                      ["startsWith", "开头是"],
-                      ["matches", "正则匹配"],
-                      ["in_cidr", "属于 CIDR"],
-                    ].map(([value, label]) => ({ value, label }))}
-                  />
-                </Col>
-                <Col xs={24} md={8}>
-                  <Input
-                    value={c.value}
-                    onChange={(e) =>
-                      setConditions(
-                        conditions.map((x, j) =>
-                          i === j ? { ...x, value: e.target.value } : x,
-                        ),
-                      )
-                    }
-                  />
-                </Col>
-                <Col xs={24} md={2}>
-                  <Button
-                    icon={<DeleteOutlined aria-hidden="true" />}
-                    aria-label="删除条件"
-                    disabled={conditions.length === 1}
-                    onClick={() =>
-                      setConditions(conditions.filter((_, j) => i !== j))
-                    }
-                  />
-                </Col>
-              </Row>
-            ))}
-            <Space>
-              <Button
-                size="small"
-                onClick={() =>
-                  setConditions([
-                    ...conditions,
-                    { field: "request.method", op: "eq", value: "GET" },
-                  ])
-                }
-              >
-                添加条件
-              </Button>
-              <Button size="small" onClick={generate}>
-                生成表达式
-              </Button>
-            </Space>
-          </Card>
-          <Form.Item
-            name="expression"
-            label="CEL 表达式"
-            className="form-top"
-            rules={[{ required: true }]}
-            extra={
-              '请求头和查询参数是多值映射。示例："x-key" in request.headers && request.headers["x-key"].exists(v, v == "demo")'
-            }
-          >
-            <Input.TextArea rows={4} className="code-input" />
-          </Form.Item>
+          <MatchFields sites={p.sites} form={form} />
           <Row gutter={20}>
             <Col xs={24} md={12}>
               <Form.Item name="action" label="动作">
@@ -1114,11 +1191,11 @@ export function CustomPage(p: PolicyProps) {
                       { value: "custom_rules", label: "剩余自定义规则" },
                       { value: "rate_limits", label: "全部速率限制规则" },
                       { value: "managed", label: "托管规则" },
-                      ...(site?.rate_limits || []).map((r) => ({
+                      ...(security.rate_limits || []).map((r) => ({
                         value: `rate:${r.id}`,
                         label: `限流 ${r.name || r.id}`,
                       })),
-                      ...(site?.rules || [])
+                      ...(security.custom_rules || [])
                         .filter((r) => r.id !== getFieldValue("id"))
                         .map((r) => ({
                           value: `rule:${r.id}`,
@@ -1209,29 +1286,14 @@ export function CustomPage(p: PolicyProps) {
               ) : null
             }
           </Form.Item>
-          <Card size="small" title="样例验证">
-            <Input.TextArea
-              value={sample}
-              onChange={(e) => setSample(e.target.value)}
-              rows={4}
-              className="code-input"
-            />
-            <Button
-              icon={<ExperimentOutlined aria-hidden="true" />}
-              loading={checking}
-              onClick={() => void check()}
-              className="form-top"
-            >
-              校验并运行样例
-            </Button>
-          </Card>
         </Form>
       </Modal>
     </>
   );
 }
-export function RatePage(p: PolicyProps) {
-  const { site, update } = useSite(p);
+export function RatePage(p: SecurityProps) {
+  const security = p.security;
+  const update = p.change;
   const [open, setOpen] = useState(false);
   const [index, setIndex] = useState(-1);
   const [form] = Form.useForm();
@@ -1241,6 +1303,7 @@ export function RatePage(p: PolicyProps) {
       r
         ? structuredClone(r)
         : {
+            scope: allSites(),
             id: "",
             name: "",
             enabled: true,
@@ -1254,12 +1317,16 @@ export function RatePage(p: PolicyProps) {
     setOpen(true);
   };
   const save = async () => {
-    if (!site) return;
     const v = await form.validateFields();
-    const rules = [...site.rate_limits];
+    v.scope = cleanScope(v.scope);
+    if (index < 0 && security.rate_limits.some((r) => r.id === v.id)) {
+      message.error("策略标识已存在");
+      return;
+    }
+    const rules = [...security.rate_limits];
     if (index < 0) rules.push(v);
     else rules[index] = v;
-    update({ ...site, rate_limits: rules });
+    update({ ...security, rate_limits: rules });
     setOpen(false);
   };
   return (
@@ -1271,7 +1338,7 @@ export function RatePage(p: PolicyProps) {
             <Button
               type="primary"
               icon={<PlusOutlined aria-hidden="true" />}
-              disabled={!site || !p.editable}
+              disabled={!p.editable}
               onClick={() => edit()}
             >
               添加速率限制规则
@@ -1279,88 +1346,95 @@ export function RatePage(p: PolicyProps) {
           </Space>
         }
       >
-        {site ? (
-          <Table
-            rowKey="id"
-            dataSource={site.rate_limits}
-            pagination={false}
-            scroll={{ x: 800 }}
-            columns={[
-              { title: "策略", render: (_, r: RateLimit) => r.name || r.id },
-              {
-                title: "匹配条件",
-                dataIndex: "expression",
-                render: (s: string) => <code>{s}</code>,
-              },
-              { title: "维度", dataIndex: "key" },
-              {
-                title: "速率 / 突发",
-                render: (_, r: RateLimit) =>
-                  `${r.requests_per_second}/秒 · ${r.burst}`,
-              },
-              {
-                title: "封禁",
-                render: (_, r: RateLimit) =>
-                  r.ban_seconds ? `${r.ban_seconds} 秒` : "仅限流",
-              },
-              {
-                title: "启用",
-                render: (_, r: RateLimit) => (
-                  <Switch
+        <Table
+          rowKey="id"
+          dataSource={security.rate_limits}
+          pagination={false}
+          scroll={{ x: 800 }}
+          columns={[
+            { title: "策略", render: (_, r: RateLimit) => r.name || r.id },
+            {
+              title: "适用网站",
+              render: (_, r: RateLimit) => (
+                <ScopeLabel scope={r.scope} sites={p.sites} />
+              ),
+            },
+            {
+              title: "匹配条件",
+              dataIndex: "expression",
+              render: (s: string) => <code>{s}</code>,
+            },
+            { title: "维度", dataIndex: "key" },
+            {
+              title: "速率 / 突发",
+              render: (_, r: RateLimit) =>
+                `${r.requests_per_second}/秒 · ${r.burst}`,
+            },
+            {
+              title: "封禁",
+              render: (_, r: RateLimit) =>
+                r.ban_seconds ? `${r.ban_seconds} 秒` : "仅限流",
+            },
+            {
+              title: "启用",
+              render: (_, r: RateLimit) => (
+                <Switch
+                  size="small"
+                  disabled={!p.editable}
+                  checked={r.enabled}
+                  onChange={(enabled) =>
+                    update({
+                      ...security,
+                      rate_limits: security.rate_limits.map((x) =>
+                        x.id === r.id ? { ...x, enabled } : x,
+                      ),
+                    })
+                  }
+                />
+              ),
+            },
+            {
+              title: "操作",
+              render: (_, r: RateLimit, i: number) => (
+                <Space>
+                  <Button
                     size="small"
                     disabled={!p.editable}
-                    checked={r.enabled}
-                    onChange={(enabled) =>
+                    onClick={() => edit(r, i)}
+                  >
+                    编辑
+                  </Button>
+                  <Button
+                    size="small"
+                    danger
+                    disabled={!p.editable}
+                    onClick={() =>
                       update({
-                        ...site,
-                        rate_limits: site.rate_limits.map((x) =>
-                          x.id === r.id ? { ...x, enabled } : x,
+                        ...security,
+                        rate_limits: security.rate_limits.filter(
+                          (_, j) => i !== j,
                         ),
                       })
                     }
-                  />
-                ),
-              },
-              {
-                title: "操作",
-                render: (_, r: RateLimit, i: number) => (
-                  <Space>
-                    <Button
-                      size="small"
-                      disabled={!p.editable}
-                      onClick={() => edit(r, i)}
-                    >
-                      编辑
-                    </Button>
-                    <Button
-                      size="small"
-                      danger
-                      disabled={!p.editable}
-                      onClick={() =>
-                        update({
-                          ...site,
-                          rate_limits: site.rate_limits.filter(
-                            (_, j) => i !== j,
-                          ),
-                        })
-                      }
-                    >
-                      移除
-                    </Button>
-                  </Space>
-                ),
-              },
-            ]}
-          />
-        ) : (
-          empty
-        )}
+                  >
+                    移除
+                  </Button>
+                </Space>
+              ),
+            },
+          ]}
+        />
       </Card>
       <Modal
         title="速率限制规则"
+        width={900}
         open={open}
         onCancel={() => setOpen(false)}
-        onOk={() => void save()}
+        onOk={() =>
+          void save().catch((e) => {
+            if (e instanceof Error) message.error(e.message);
+          })
+        }
         okText="保存到草稿"
       >
         <Form name="rate-rule" form={form} layout="vertical">
@@ -1370,14 +1444,12 @@ export function RatePage(p: PolicyProps) {
           <Form.Item name="name" label="显示名称">
             <Input />
           </Form.Item>
+          <MatchFields sites={p.sites} form={form} />
           <Form.Item
-            name="expression"
-            label="CEL 匹配条件"
-            rules={[{ required: true }]}
+            name="key"
+            label="限流维度"
+            extra="各网站独立计数，同一规则在不同网站的额度互不影响。"
           >
-            <Input.TextArea rows={2} />
-          </Form.Item>
-          <Form.Item name="key" label="限流维度">
             <Select
               options={[
                 { value: "ip", label: "每个 IP" },

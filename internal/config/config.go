@@ -113,23 +113,21 @@ func (b Bootstrap) Validate() error {
 }
 
 type Bundle struct {
-	Sites []Site `json:"sites"`
+	Sites    []Site   `json:"sites"`
+	Security Security `json:"security"`
 }
 type Site struct {
-	ID                  string            `json:"id"`
-	Name                string            `json:"name"`
-	Enabled             bool              `json:"enabled"`
-	Domains             []string          `json:"domains"`
-	HTTPS               bool              `json:"https"`
-	RedirectHTTP        bool              `json:"redirect_http"`
-	DNSCredential       string            `json:"dns_credential"`
-	Upstreams           []Upstream        `json:"upstreams"`
-	Managed             ManagedPolicy     `json:"managed"`
-	Rules               []CustomRule      `json:"rules"`
-	RateLimits          []RateLimitPolicy `json:"rate_limits"`
-	Routes              []RoutePolicy     `json:"routes"`
-	MaxConnectionsPerIP int               `json:"max_connections_per_ip"`
-	WebSocketOrigins    []string          `json:"websocket_origins"`
+	ID                  string        `json:"id"`
+	Name                string        `json:"name"`
+	Enabled             bool          `json:"enabled"`
+	Domains             []string      `json:"domains"`
+	HTTPS               bool          `json:"https"`
+	RedirectHTTP        bool          `json:"redirect_http"`
+	DNSCredential       string        `json:"dns_credential"`
+	Upstreams           []Upstream    `json:"upstreams"`
+	Routes              []RoutePolicy `json:"routes"`
+	MaxConnectionsPerIP int           `json:"max_connections_per_ip"`
+	WebSocketOrigins    []string      `json:"websocket_origins"`
 }
 type Upstream struct {
 	URL        string `json:"url"`
@@ -158,11 +156,13 @@ type ManagedPolicy struct {
 	Exclusions []Exclusion `json:"exclusions"`
 }
 type Exclusion struct {
+	Scope      Scope  `json:"scope"`
 	RuleID     int    `json:"rule_id"`
 	PathPrefix string `json:"path_prefix"`
 	Target     string `json:"target"`
 }
 type CustomRule struct {
+	Scope      Scope             `json:"scope"`
 	ID         string            `json:"id"`
 	Name       string            `json:"name"`
 	Enabled    bool              `json:"enabled"`
@@ -186,6 +186,7 @@ func IsChallengeAction(action string) bool {
 }
 
 type RateLimitPolicy struct {
+	Scope             Scope   `json:"scope"`
 	ID                string  `json:"id"`
 	Name              string  `json:"name"`
 	Enabled           bool    `json:"enabled"`
@@ -209,7 +210,7 @@ func DefaultRoute() RoutePolicy {
 	return RoutePolicy{PathPrefix: "/", BodyMode: "inspect", MaxBodyBytes: 8 * MiB, IdleTimeoutSeconds: 300, MaxConcurrent: 256}
 }
 func DefaultSite() Site {
-	return Site{Enabled: true, HTTPS: true, RedirectHTTP: true, DNSCredential: "cloudflare", Managed: ManagedPolicy{Mode: "observe", Paranoia: 1, Threshold: 5}, Routes: []RoutePolicy{DefaultRoute()}, MaxConnectionsPerIP: 32}
+	return Site{Enabled: true, HTTPS: true, RedirectHTTP: true, DNSCredential: "cloudflare", Routes: []RoutePolicy{DefaultRoute()}, MaxConnectionsPerIP: 32}
 }
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -268,13 +269,11 @@ func (b *Bundle) NormalizeAndValidate(boot Bootstrap) error {
 	}
 	ids := map[string]bool{}
 	domains := map[string]bool{}
-	totalRules, totalRates, totalRoutes := 0, 0, 0
+	totalRoutes := 0
 	for i := range b.Sites {
 		s := &b.Sites[i]
-		totalRules += len(s.Rules)
-		totalRates += len(s.RateLimits)
 		totalRoutes += len(s.Routes)
-		if totalRules > 2000 || totalRates > 1000 || totalRoutes > 1000 {
+		if totalRoutes > 1000 {
 			return errors.New("configuration exceeds global policy count limits")
 		}
 		if !ValidID(s.ID) || ids[s.ID] {
@@ -321,87 +320,9 @@ func (b *Bundle) NormalizeAndValidate(boot Bootstrap) error {
 				return errors.New("invalid health path")
 			}
 		}
-		m := &s.Managed
-		if m.Mode == "" {
-			m.Mode = "observe"
+		if len(s.Routes) > 100 {
+			return errors.New("too many routes")
 		}
-		if m.Paranoia == 0 {
-			m.Paranoia = 1
-		}
-		if m.Threshold == 0 {
-			m.Threshold = 5
-		}
-		if m.Mode != "off" && m.Mode != "observe" && m.Mode != "block" {
-			return errors.New("managed mode must be off, observe or block")
-		}
-		if m.Paranoia < 1 || m.Paranoia > 4 || m.Threshold < 1 || m.Threshold > 100 {
-			return errors.New("invalid managed policy")
-		}
-		if len(m.Exclusions) > 500 {
-			return errors.New("too many exclusions")
-		}
-		for _, x := range m.Exclusions {
-			if x.RuleID < 900000 || x.RuleID > 999999 || strings.ContainsAny(x.PathPrefix, "\r\n\"\\") || x.PathPrefix != "" && !strings.HasPrefix(x.PathPrefix, "/") || x.Target != "" && !targetPattern.MatchString(x.Target) {
-				return errors.New("invalid managed rule exclusion")
-			}
-		}
-		if len(s.Rules) > 200 || len(s.RateLimits) > 100 || len(s.Routes) > 100 {
-			return errors.New("too many policies")
-		}
-		rids := map[string]bool{}
-		challenges := 0
-		for j := range s.Rules {
-			r := &s.Rules[j]
-			if IsChallengeAction(r.Action) {
-				challenges++
-				if r.Challenge == nil {
-					options := DefaultChallenge()
-					r.Challenge = &options
-				}
-				if r.Challenge.WorkFactor < 1000 || r.Challenge.WorkFactor > 20000 || r.Challenge.ClearanceSeconds < 60 || r.Challenge.ClearanceSeconds > 86400 {
-					return errors.New("invalid challenge options")
-				}
-			} else if r.Challenge != nil {
-				return errors.New("challenge options require a challenge action")
-			}
-			if challenges > 16 {
-				return errors.New("at most 16 challenge rules per site are supported")
-			}
-			if !ValidID(r.ID) || rids[r.ID] || len(r.Name) > 128 || len(r.Expression) > 4096 {
-				return errors.New("invalid custom rule")
-			}
-			rids[r.ID] = true
-			if r.Action != "block" && r.Action != "log" && !IsChallengeAction(r.Action) && r.Action != "skip" {
-				return errors.New("invalid rule action")
-			}
-			if r.Action == "skip" && len(r.Skip) == 0 {
-				return errors.New("skip requires explicit targets")
-			}
-		}
-		rateIDs := map[string]bool{}
-		for _, r := range s.RateLimits {
-			if !ValidID(r.ID) || rateIDs[r.ID] || r.RequestsPerSecond <= 0 || r.RequestsPerSecond > 100000 || r.Burst < 1 || r.Burst > 100000 || r.BanSeconds < 0 || r.BanSeconds > 86400 || len(r.Expression) > 4096 {
-				return errors.New("invalid rate limit")
-			}
-			rateIDs[r.ID] = true
-			if r.Key != "ip" && r.Key != "site" && r.Key != "ip_path" {
-				return errors.New("invalid rate key")
-			}
-		}
-		for _, r := range s.Rules {
-			for _, k := range r.Skip {
-				if k != "managed" && k != "custom_rules" && k != "rate_limits" && !strings.HasPrefix(k, "rate:") && !strings.HasPrefix(k, "rule:") {
-					return errors.New("invalid skip target")
-				}
-				if strings.HasPrefix(k, "rate:") && !rateIDs[strings.TrimPrefix(k, "rate:")] {
-					return errors.New("unknown skipped rate policy")
-				}
-				if strings.HasPrefix(k, "rule:") && !rids[strings.TrimPrefix(k, "rule:")] {
-					return errors.New("unknown skipped rule")
-				}
-			}
-		}
-		sort.SliceStable(s.Rules, func(a, b int) bool { return s.Rules[a].Priority < s.Rules[b].Priority })
 		if len(s.Routes) == 0 {
 			s.Routes = []RoutePolicy{DefaultRoute()}
 		}
@@ -458,7 +379,7 @@ func (b *Bundle) NormalizeAndValidate(boot Bootstrap) error {
 		}
 
 	}
-	return nil
+	return b.Security.NormalizeAndValidate(ids)
 }
 
 func (s Site) Route(path, method string) RoutePolicy {

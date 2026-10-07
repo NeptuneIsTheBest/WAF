@@ -23,7 +23,7 @@ func CompileExpression(source string) (*Expression, error) {
 	if len(source) > 4096 {
 		return nil, errors.New("expression exceeds 4096 bytes")
 	}
-	env, e := cel.NewEnv(cel.Variable("request", cel.MapType(cel.StringType, cel.DynType)), cel.Variable("client", cel.MapType(cel.StringType, cel.DynType)), cel.ParserRecursionLimit(32), cel.ParserExpressionSizeLimit(4096), cel.Function("in_cidr", cel.Overload("in_cidr_string_string", []*cel.Type{cel.StringType, cel.StringType}, cel.BoolType, cel.BinaryBinding(func(a, b ref.Val) ref.Val {
+	env, e := cel.NewEnv(cel.Variable("site", cel.MapType(cel.StringType, cel.DynType)), cel.Variable("request", cel.MapType(cel.StringType, cel.DynType)), cel.Variable("client", cel.MapType(cel.StringType, cel.DynType)), cel.ParserRecursionLimit(32), cel.ParserExpressionSizeLimit(4096), cel.Function("in_cidr", cel.Overload("in_cidr_string_string", []*cel.Type{cel.StringType, cel.StringType}, cel.BoolType, cel.BinaryBinding(func(a, b ref.Val) ref.Val {
 		ip, err := netip.ParseAddr(string(a.(types.String)))
 		if err != nil {
 			return types.False
@@ -63,7 +63,7 @@ func (e *Expression) Eval(ctx context.Context, data map[string]any) (bool, error
 	}
 	return b, nil
 }
-func RequestData(r *http.Request, ip string) map[string]any {
+func RequestData(r *http.Request, ip, siteID string) map[string]any {
 	headers := map[string]any{}
 	for k, v := range r.Header {
 		headers[strings.ToLower(k)] = v
@@ -72,5 +72,5 @@ func RequestData(r *http.Request, ip string) map[string]any {
 	for k, v := range r.URL.Query() {
 		query[k] = v
 	}
-	return map[string]any{"client": map[string]any{"ip": ip}, "request": map[string]any{"host": config.Host(r.Host), "method": r.Method, "path": config.CanonicalPath(r.URL.Path), "raw_path": r.URL.EscapedPath(), "query": query, "raw_query": r.URL.RawQuery, "headers": headers, "user_agent": r.UserAgent(), "protocol": r.Proto, "tls": r.TLS != nil}}
+	return map[string]any{"site": map[string]any{"id": siteID}, "client": map[string]any{"ip": ip}, "request": map[string]any{"host": config.Host(r.Host), "method": r.Method, "path": config.CanonicalPath(r.URL.Path), "raw_path": r.URL.EscapedPath(), "query": query, "raw_query": r.URL.RawQuery, "headers": headers, "user_agent": r.UserAgent(), "protocol": r.Proto, "tls": r.TLS != nil}}
 }

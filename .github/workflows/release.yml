@@ -37,5 +37,9 @@ jobs:
 
           安装包和安装脚本的 SHA-256 校验值见 SHA256SUMS。
           NOTES
+          version_notes="docs/releases/$GITHUB_REF_NAME.md"
+          if [[ -f "$version_notes" ]]; then
+            cp "$version_notes" "$RUNNER_TEMP/release-notes.md"
+          fi
           gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/SHA256SUMS release/install.sh \
             --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md" --latest

@@ -39,8 +39,16 @@ import {
   UserOutlined,
 } from "@ant-design/icons";
 import { api, setCSRF } from "./api";
-import { normalizeSite } from "./types";
-import type { Draft, Revision, SecurityEvent, Session, Site } from "./types";
+import { normalizeBundle, defaultBundle, defaultSecurity } from "./types";
+import type {
+  Draft,
+  Revision,
+  SecurityEvent,
+  Session,
+  Site,
+  Bundle,
+  Security,
+} from "./types";
 import { SecurityRulesPage, RoutesPage, SitesPage } from "./PolicyPages";
 import type { PolicyProps } from "./PolicyPages";
 import {
@@ -151,9 +159,12 @@ function Console() {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState("overview");
-  const [managedRequest, setManagedRequest] = useState(0);
+  const [managedRequest, setManagedRequest] = useState<{
+    id: string;
+    nonce: number;
+  } | null>(null);
   const [draft, setDraft] = useState<Draft>();
-  const [active, setActive] = useState<Site[]>([]);
+  const [active, setActive] = useState<Bundle>(defaultBundle());
   const [selected, setSelected] = useState("");
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -187,9 +198,9 @@ function Console() {
       api<Draft>("/config/draft"),
       api<Revision>("/config/active"),
     ]);
-    d.bundle.sites = (d.bundle.sites || []).map(normalizeSite);
+    d.bundle = normalizeBundle(d.bundle);
     setDraft(d);
-    setActive((a.bundle.sites || []).map(normalizeSite));
+    setActive(normalizeBundle(a.bundle));
     setSelected((current) =>
       d.bundle.sites.some((s) => s.id === current)
         ? current
@@ -214,14 +225,20 @@ function Console() {
   }, [dirty]);
   const change = (sites: Site[]) => {
     if (draft) {
-      setDraft({ ...draft, bundle: { sites } });
+      setDraft({ ...draft, bundle: { ...draft.bundle, sites } });
+      setDirty(true);
+    }
+  };
+  const changeSecurity = (security: Security) => {
+    if (draft) {
+      setDraft({ ...draft, bundle: { ...draft.bundle, security } });
       setDirty(true);
     }
   };
   const save = async () => {
     if (!draft) throw new Error("配置尚未加载");
     const d = await api<Draft>("/config/draft", "PUT", draft);
-    d.bundle.sites = d.bundle.sites.map(normalizeSite);
+    d.bundle = normalizeBundle(d.bundle);
     setDraft(d);
     setDirty(false);
     return d;
@@ -313,6 +330,7 @@ function Console() {
   const editable = session.user.role !== "viewer";
   const admin = session.user.role === "admin";
   const props: PolicyProps = {
+    security: draft?.bundle.security || defaultSecurity(),
     sites: draft?.bundle.sites || [],
     selected,
     select: setSelected,
@@ -405,24 +423,41 @@ function Console() {
       message.error("站点已不在当前草稿中");
       return;
     }
-    change(
-      props.sites.map((s) =>
-        s.id === site.id
-          ? {
-              ...s,
-              managed: {
-                ...s.managed,
-                exclusions: [
-                  ...s.managed.exclusions,
-                  { rule_id: Number(event.rule_id), path_prefix: path, target },
-                ],
-              },
-            }
-          : s,
-      ),
-    );
-    setSelected(site.id);
-    setManagedRequest((v) => v + 1);
+    const security = props.security;
+    const policyID = event.managed_policy_id;
+    const policy =
+      policyID === "default"
+        ? security.managed.default
+        : security.managed.overrides.find((o) => o.id === policyID)?.policy;
+    if (!policy || !policyID) {
+      message.error("事件对应的托管策略已不在当前草稿中");
+      return;
+    }
+    const next = {
+      ...policy,
+      exclusions: [
+        ...policy.exclusions,
+        {
+          scope: { mode: "sites" as const, site_ids: [site.id] },
+          rule_id: Number(event.rule_id),
+          path_prefix: path,
+          target,
+        },
+      ],
+    };
+    changeSecurity({
+      ...security,
+      managed:
+        policyID === "default"
+          ? { ...security.managed, default: next }
+          : {
+              ...security.managed,
+              overrides: security.managed.overrides.map((o) =>
+                o.id === policyID ? { ...o, policy: next } : o,
+              ),
+            },
+    });
+    setManagedRequest({ id: policyID, nonce: Date.now() });
     setPage("security");
     message.success("例外已加入草稿，请检查范围后发布");
   };
@@ -434,10 +469,12 @@ function Console() {
     case "security":
       content = (
         <SecurityRulesPage
-          key={selected}
-          {...props}
+          sites={props.sites}
+          security={props.security}
+          change={changeSecurity}
+          editable={editable}
           managedRequest={managedRequest}
-          onManagedClose={() => setManagedRequest(0)}
+          onManagedClose={() => setManagedRequest(null)}
         />
       );
       break;
@@ -475,7 +512,13 @@ function Console() {
       );
       break;
     default:
-      content = <OverviewPage sites={active} refresh={refresh} />;
+      content = (
+        <OverviewPage
+          sites={active.sites}
+          security={active.security}
+          refresh={refresh}
+        />
+      );
   }
   const navigation = (
     <Menu
@@ -484,7 +527,7 @@ function Console() {
       selectedKeys={[page]}
       onClick={({ key }) => {
         setPage(key);
-        setManagedRequest(0);
+        setManagedRequest(null);
         setNavigationOpen(false);
       }}
       items={menu}
@@ -653,7 +696,7 @@ function Console() {
                           Modal.confirm({
                             title: "发布当前配置？",
                             content:
-                              "所有站点的草稿将在校验通过后生效。已建立的 SSE 和 WebSocket 连接继续使用原配置。",
+                              "网站配置与全局安全规则将在校验通过后一起生效。已建立的 SSE 和 WebSocket 连接继续使用原配置。",
                             okText: "校验并发布",
                             onOk: publish,
                           })

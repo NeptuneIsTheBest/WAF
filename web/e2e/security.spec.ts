@@ -1,14 +1,16 @@
 import { test, expect } from "@playwright/test";
-import type { BrowserContext, Page } from "@playwright/test";
-import { defaultSite } from "../src/types";
-import type { Draft, Session, Site } from "../src/types";
+import type { BrowserContext } from "@playwright/test";
+import { defaultSite, defaultSecurity } from "../src/types";
+import type { Draft, Session, Site, Security, CustomRule } from "../src/types";
 
 async function login(context: BrowserContext) {
-  const response = await context.request.post("/api/v1/auth/login", {
-    headers: { Origin: "http://admin.localhost:18080" },
-    data: { username: "admin", password: "browser-test-password", code: "" },
-  });
-  expect(response.ok()).toBeTruthy();
+  let response = await context.request.get("/api/v1/auth/session");
+  if (!response.ok())
+    response = await context.request.post("/api/v1/auth/login", {
+      headers: { Origin: "http://admin.localhost:18080" },
+      data: { username: "admin", password: "browser-test-password", code: "" },
+    });
+  expect(response.ok(), await response.text()).toBeTruthy();
   const session: Session = await response.json();
   return {
     session,
@@ -18,11 +20,16 @@ async function login(context: BrowserContext) {
     },
   };
 }
-async function addSite(context: BrowserContext, site: Site) {
+async function addSite(
+  context: BrowserContext,
+  site: Site,
+  security?: Security,
+) {
   const { headers } = await login(context);
   const draft: Draft = await (
     await context.request.get("/api/v1/config/draft")
   ).json();
+  if (security) draft.bundle.security = security;
   draft.bundle.sites = [
     ...draft.bundle.sites.filter((s) => s.id !== site.id),
     site,
@@ -50,24 +57,22 @@ function newSite(id: string): Site {
     upstreams: [{ url: "http://127.0.0.1:18081", weight: 1, health_path: "" }],
   };
 }
-async function selectSite(page: Page, name: string) {
-  await page.getByRole("combobox", { name: "选择站点" }).click();
-  await page.getByTitle(name, { exact: true }).click();
-}
 
-test("unified rules page edits all actions, rates and managed settings, preserves site isolation and read-only access", async ({
+test("global security editor handles scopes, overrides, events and read-only access", async ({
   page,
   context,
 }) => {
   const first = newSite("security-editor");
   const second = newSite("security-other");
-  await addSite(context, first);
+  test.setTimeout(120000);
+  await addSite(context, first, defaultSecurity());
   await addSite(context, second);
   const { session } = await login(context);
   await page.goto("/");
   await page.getByRole("menuitem", { name: "安全规则", exact: true }).click();
-  await selectSite(page, first.name);
-  await expect(page.getByRole("combobox", { name: "选择站点" })).toHaveCount(1);
+  await expect(
+    page.getByRole("combobox", { name: "选择站点", exact: true }),
+  ).toHaveCount(0);
   for (const name of ["自定义规则", "速率限制规则", "托管规则"])
     await expect(page.getByRole("region", { name, exact: true })).toBeVisible();
   for (const name of ["自定义规则", "请求限流", "托管规则", "Bot 与浏览器挑战"])
@@ -90,7 +95,33 @@ test("unified rules page edits all actions, rates and managed settings, preserve
     });
     await dialog.getByLabel("规则标识", { exact: true }).fill("rule-" + i);
     await dialog.getByLabel("显示名称", { exact: true }).fill(action);
-    await dialog.getByLabel("CEL 表达式", { exact: true }).fill("false");
+    await dialog
+      .getByLabel("CEL 表达式", { exact: true })
+      .fill(action === "Block" ? 'request.path == "/global-block"' : "false");
+    if (i === 0) {
+      await dialog
+        .getByRole("radio", { name: "指定网站", exact: true })
+        .check();
+      await dialog.getByLabel("选择适用网站", { exact: true }).click();
+      await page.getByTitle(first.name, { exact: true }).click();
+      await page.keyboard.press("Escape");
+      await dialog.getByLabel("CEL 表达式", { exact: true }).fill("true");
+      await dialog
+        .getByLabel("样例请求", { exact: true })
+        .fill(JSON.stringify({ site: { id: second.id } }));
+      await dialog.getByRole("button", { name: "校验并运行样例" }).click();
+      await expect(
+        page.getByText("规则有效，样例请求不匹配", { exact: true }),
+      ).toBeVisible();
+      await dialog
+        .getByLabel("样例请求", { exact: true })
+        .fill(JSON.stringify({ site: { id: first.id } }));
+      await dialog.getByRole("button", { name: "校验并运行样例" }).click();
+      await expect(
+        page.getByText("规则有效，样例请求匹配", { exact: true }),
+      ).toBeVisible();
+      await dialog.getByLabel("CEL 表达式", { exact: true }).fill("false");
+    }
     await dialog.getByLabel("动作", { exact: true }).click();
     await page
       .locator(".ant-select-item-option")
@@ -116,6 +147,9 @@ test("unified rules page edits all actions, rates and managed settings, preserve
   await page.getByRole("button", { name: "添加速率限制规则" }).click();
   const rate = page.getByRole("dialog", { name: "速率限制规则", exact: true });
   await rate.getByLabel("策略标识", { exact: true }).fill("api-rate");
+  await rate
+    .getByLabel("CEL 表达式", { exact: true })
+    .fill('request.path == "/limited"');
   await rate.getByRole("button", { name: "保存到草稿" }).click();
   await page.getByRole("button", { name: "配置托管规则" }).click();
   const managed = page.getByRole("dialog", { name: "配置托管规则" });
@@ -129,8 +163,8 @@ test("unified rules page edits all actions, rates and managed settings, preserve
   const saved: Draft = await (
     await context.request.get("/api/v1/config/draft")
   ).json();
-  const edited = saved.bundle.sites.find((s) => s.id === first.id)!;
-  expect(edited.rules.map((r) => r.action)).toEqual([
+  const edited = saved.bundle.security;
+  expect(edited.custom_rules.map((r) => r.action)).toEqual([
     "managed_challenge",
     "non_interactive_challenge",
     "interactive_challenge",
@@ -139,24 +173,161 @@ test("unified rules page edits all actions, rates and managed settings, preserve
     "block",
   ]);
   expect(
-    edited.rules.slice(0, 3).map((r) => r.challenge?.clearance_seconds),
+    edited.custom_rules.slice(0, 3).map((r) => r.challenge?.clearance_seconds),
   ).toEqual([60, 120, 180]);
-  expect(edited.rules.slice(3).every((r) => !r.challenge)).toBeTruthy();
+  expect(edited.custom_rules.slice(3).every((r) => !r.challenge)).toBeTruthy();
   expect(edited.rate_limits[0].id).toBe("api-rate");
-  expect(edited.managed.mode).toBe("block");
-  expect(saved.bundle.sites.find((s) => s.id === second.id)?.rules).toEqual([]);
+  expect(edited.managed.default.mode).toBe("block");
+  expect(edited.custom_rules[0].scope).toEqual({
+    mode: "sites",
+    site_ids: [first.id],
+  });
+  expect(edited.custom_rules[5].scope.mode).toBe("all");
+  expect(saved.bundle.sites.find((s) => s.id === first.id)).not.toHaveProperty(
+    "rules",
+  );
   await page.getByRole("button", { name: "发布配置", exact: true }).click();
   await page.getByRole("button", { name: "校验并发布", exact: true }).click();
   await expect(
     page.getByText(`基于配置 v${saved.base_revision + 1} ·`, { exact: false }),
   ).toBeVisible();
-  await selectSite(page, second.name);
+  // A site edit must keep the global security configuration.
+  await page.getByRole("menuitem", { name: "站点管理", exact: true }).click();
+  const row = page.getByRole("row").filter({ hasText: first.name }).first();
+  await row.getByRole("button", { name: "编辑", exact: true }).click();
+  const siteEditor = page.getByRole("dialog");
+  await siteEditor.getByLabel("显示名称", { exact: true }).fill("编辑后的网站");
+  await siteEditor.getByRole("button", { name: "保存到草稿" }).click();
+  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
   await expect(
-    page
-      .getByRole("region", { name: "自定义规则", exact: true })
-      .getByText("rule-0", { exact: true }),
-  ).toHaveCount(0);
-  await selectSite(page, first.name);
+    page.getByText("草稿已保存，尚未发布", { exact: true }),
+  ).toBeVisible();
+  const afterSite: Draft = await (
+    await context.request.get("/api/v1/config/draft")
+  ).json();
+  expect(afterSite.bundle.security).toEqual(saved.bundle.security);
+  await page.getByRole("menuitem", { name: "安全规则", exact: true }).click();
+  await page.getByRole("button", { name: "添加覆盖策略" }).click();
+  const override = page.getByRole("dialog", {
+    name: "托管覆盖策略",
+    exact: true,
+  });
+  await override.getByLabel("策略标识", { exact: true }).fill("observe-path");
+  await override
+    .getByLabel("CEL 表达式", { exact: true })
+    .fill('request.path == "/observe"');
+  await override.getByRole("radio", { name: "指定网站", exact: true }).check();
+  await override.getByLabel("选择适用网站", { exact: true }).click();
+  await page.getByTitle("编辑后的网站", { exact: true }).click();
+  await page.keyboard.press("Escape");
+  await override.getByRole("button", { name: "保存到草稿" }).click();
+  const policy = page.getByRole("dialog", {
+    name: "配置托管覆盖 · observe-path",
+  });
+  await policy.getByRole("radio", { name: "观察", exact: true }).check();
+  await policy.getByRole("button", { name: "关闭", exact: true }).click();
+  await page.getByRole("button", { name: "发布配置", exact: true }).click();
+  await page.getByRole("button", { name: "校验并发布", exact: true }).click();
+  await expect(
+    page.getByText(`基于配置 v${saved.base_revision + 2} ·`, { exact: false }),
+  ).toBeVisible();
+  const attack = "?q=" + encodeURIComponent("<script>alert(1)</script>");
+  for (const [site, path, status] of [
+    [first, "/observe" + attack, 200],
+    [second, "/observe" + attack, 403],
+    [first, "/global-block", 403],
+    [second, "/global-block", 403],
+  ] as const) {
+    expect(
+      (
+        await context.request.get("http://127.0.0.1:18080" + path, {
+          headers: { Host: site.domains[0] },
+        })
+      ).status(),
+    ).toBe(status);
+  }
+  const third = newSite("security-new");
+  await addSite(context, third);
+  expect(
+    (
+      await context.request.get("http://127.0.0.1:18080/global-block", {
+        headers: { Host: third.domains[0] },
+      })
+    ).status(),
+  ).toBe(403);
+  await page.reload();
+  await page.getByRole("menuitem", { name: "安全规则", exact: true }).click();
+  expect(
+    (
+      await context.request.get("http://127.0.0.1:18080/crs-probe", {
+        headers: { Host: first.domains[0], "User-Agent": "sqlmap" },
+      })
+    ).status(),
+  ).toBe(403);
+  await page.getByRole("menuitem", { name: "安全事件", exact: true }).click();
+  const eventRow = page
+    .getByRole("row")
+    .filter({ hasText: "/crs-probe" })
+    .first();
+  await expect
+    .poll(async () => {
+      await page.getByRole("button", { name: "刷新", exact: true }).click();
+      return eventRow.count();
+    })
+    .toBeGreaterThan(0);
+  await eventRow.getByRole("button", { name: "查看", exact: true }).click();
+  await page
+    .getByRole("dialog", { name: "事件详情" })
+    .getByRole("button", { name: "添加规则例外" })
+    .click();
+  const exceptionDialog = page
+    .getByRole("dialog")
+    .filter({ hasText: "检查例外范围后再发布" });
+  await exceptionDialog
+    .getByLabel("参数限定", { exact: true })
+    .fill("REQUEST_HEADERS:User-Agent");
+  await exceptionDialog.getByRole("button", { name: "加入草稿" }).click();
+  const exceptionPolicy = page.getByRole("dialog", {
+    name: "配置托管规则",
+    exact: true,
+  });
+  await expect(exceptionPolicy).toBeVisible();
+  await exceptionPolicy
+    .getByRole("button", { name: "关闭", exact: true })
+    .click();
+  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
+  await expect(
+    page.getByText("草稿已保存，尚未发布", { exact: true }),
+  ).toBeVisible();
+  const withException: Draft = await (
+    await context.request.get("/api/v1/config/draft")
+  ).json();
+  expect(
+    withException.bundle.security.managed.default.exclusions[0],
+  ).toMatchObject({
+    scope: { mode: "sites", site_ids: [first.id] },
+    path_prefix: "/crs-probe",
+    target: "REQUEST_HEADERS:User-Agent",
+  });
+  await page.getByRole("button", { name: "发布配置", exact: true }).click();
+  await page.getByRole("button", { name: "校验并发布", exact: true }).click();
+  await expect(
+    page.getByText(`基于配置 v${withException.base_revision + 1} ·`, {
+      exact: false,
+    }),
+  ).toBeVisible();
+  for (const [site, status] of [
+    [first, 200],
+    [second, 403],
+  ] as const) {
+    expect(
+      (
+        await context.request.get("http://127.0.0.1:18080/crs-probe", {
+          headers: { Host: site.domains[0], "User-Agent": "sqlmap" },
+        })
+      ).status(),
+    ).toBe(status);
+  }
   await expect(page.locator(".ant-message-notice")).toHaveCount(0);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.evaluate(() => window.scrollTo(0, 0));
@@ -203,22 +374,25 @@ test("ALTCHA runs locally, requires interactive clicks, escalates managed failur
 }) => {
   test.setTimeout(120000);
   const site = newSite("security-flow");
-  site.rules = [
+  const security = defaultSecurity();
+  security.custom_rules = [
     "non_interactive_challenge",
     "interactive_challenge",
     "managed_challenge",
   ].map((action, i) => ({
+    scope: { mode: "sites", site_ids: [site.id] },
     id: "flow-" + i,
     name: action,
     enabled: true,
     priority: i,
     expression: `request.path == "/${["automatic", "interactive", "managed"][i]}"`,
-    action: action as Site["rules"][number]["action"],
+    action: action as CustomRule["action"],
     skip: [],
     challenge: { work_factor: 1000, clearance_seconds: 60 },
   }));
-  site.rate_limits = [
+  security.rate_limits = [
     {
+      scope: { mode: "sites", site_ids: [site.id] },
       id: "after-clearance",
       name: "After clearance",
       enabled: true,
@@ -229,7 +403,7 @@ test("ALTCHA runs locally, requires interactive clicks, escalates managed failur
       ban_seconds: 0,
     },
   ];
-  await addSite(context, site);
+  await addSite(context, site, security);
   const failures: string[] = [];
   const external: string[] = [];
   page.on("pageerror", (e) => failures.push(e.message));
@@ -329,4 +503,49 @@ test("ALTCHA runs locally, requires interactive clicks, escalates managed failur
   expect(nonVerificationPosts).toBe(0);
   expect(external).toEqual([]);
   expect(failures).toEqual([]);
+});
+
+test("global rules can be prepared before adding any websites", async ({
+  page,
+  context,
+}) => {
+  await login(context);
+  let draft: Draft = {
+    base_revision: 0,
+    version: 1,
+    bundle: { sites: [], security: defaultSecurity() },
+  };
+  await page.route("**/api/v1/config/draft", async (route) => {
+    if (route.request().method() === "PUT") {
+      draft = route.request().postDataJSON();
+      draft.version++;
+    }
+    await route.fulfill({ json: draft });
+  });
+  await page.goto("/");
+  await page.getByRole("menuitem", { name: "安全规则", exact: true }).click();
+  await expect(
+    page.getByText("请先添加并选择一个站点", { exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "添加自定义规则" }).click();
+  const editor = page.getByRole("dialog", { name: "自定义规则", exact: true });
+  await editor.getByLabel("规则标识", { exact: true }).fill("before-sites");
+  await expect(
+    editor.getByRole("radio", { name: "所有网站（含新增网站）" }),
+  ).toBeChecked();
+  await editor.getByRole("button", { name: "保存到草稿" }).click();
+  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
+  await expect(
+    page.getByText("草稿已保存，尚未发布", { exact: true }),
+  ).toBeVisible();
+  expect(draft.bundle.sites).toEqual([]);
+  expect(draft.bundle.security.custom_rules[0].scope).toEqual({
+    mode: "all",
+    site_ids: [],
+  });
+  await page.reload();
+  await page.getByRole("menuitem", { name: "安全规则", exact: true }).click();
+  await expect(
+    page.getByText("before-sites", { exact: true }).first(),
+  ).toBeVisible();
 });

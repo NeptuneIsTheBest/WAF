@@ -60,19 +60,27 @@ func array(v any) object { return object{"type": "array", "items": v} }
 func stringType() object { return object{"type": "string"} }
 func numberType() object { return object{"type": "integer", "format": "int64"} }
 func main() {
-	for _, v := range []any{config.Bundle{}, config.Site{}, config.Upstream{}, config.ManagedPolicy{}, config.Exclusion{}, config.CustomRule{}, config.RateLimitPolicy{}, config.RoutePolicy{}, config.ChallengeOptions{}, store.Draft{}, store.Revision{}, store.User{}, store.Event{}, store.Audit{}, tlsmgr.Status{}, tlsmgr.Credential{}, policy.ManagedRule{}} {
+	for _, v := range []any{config.Bundle{}, config.Security{}, config.Scope{}, config.ManagedSecurity{}, config.ManagedOverride{}, config.Site{}, config.Upstream{}, config.ManagedPolicy{}, config.Exclusion{}, config.CustomRule{}, config.RateLimitPolicy{}, config.RoutePolicy{}, config.ChallengeOptions{}, store.Draft{}, store.Revision{}, store.User{}, store.Event{}, store.Audit{}, tlsmgr.Status{}, tlsmgr.Credential{}, policy.ManagedRule{}} {
 		schema(reflect.TypeOf(v))
 	}
-	for name, fields := range map[string][]string{"Bundle": {"sites"}, "Site": {"id", "domains", "upstreams"}, "Upstream": {"url"}, "CustomRule": {"id", "expression", "action"}, "RateLimitPolicy": {"id", "key", "requests_per_second", "burst"}, "RoutePolicy": {"path_prefix"}, "Draft": {"base_revision", "version", "bundle"}} {
+	for name, fields := range map[string][]string{"Bundle": {"sites", "security"}, "Site": {"id", "domains", "upstreams"}, "Upstream": {"url"}, "CustomRule": {"id", "expression", "action"}, "RateLimitPolicy": {"id", "key", "requests_per_second", "burst"}, "ManagedOverride": {"id", "expression", "policy"}, "RoutePolicy": {"path_prefix"}, "Draft": {"base_revision", "version", "bundle"}} {
 		schemas[name].(object)["required"] = fields
 	}
 	props("Site")["id"] = object{"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"}
+	props("Scope")["mode"] = object{"type": "string", "enum": []string{"all", "sites"}, "default": "all", "description": "sites requires nonempty valid site_ids; all includes future sites and cannot contain site_ids."}
+	props("Scope")["site_ids"].(object)["description"] = "Selected existing site IDs. Deleting a referenced site requires updating its scopes first."
+	props("ManagedOverride")["id"] = object{"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$", "description": "Globally unique override ID; default is reserved for the fallback policy."}
+	props("ManagedOverride")["priority"] = object{"type": "integer", "description": "Lower values execute first; ties keep list order. Only the first enabled matching override is used."}
+	props("Event")["managed_policy_id"] = object{"type": "string", "description": "Managed policy that produced a detector match; default identifies the global fallback. Omitted for non-managed events."}
+	props("RateLimitPolicy")["key"] = object{"type": "string", "enum": []string{"ip", "site", "ip_path"}, "description": "Counters are always isolated by site, even for an all-sites rule."}
 	props("ManagedPolicy")["mode"] = object{"type": "string", "enum": []string{"off", "observe", "block"}, "default": "observe"}
 	props("CustomRule")["action"] = object{"type": "string", "enum": []string{"block", "log", "skip", "managed_challenge", "non_interactive_challenge", "interactive_challenge"}}
 	props("ChallengeOptions")["work_factor"] = object{"type": "integer", "minimum": 1000, "maximum": 20000, "default": 5000}
 	props("ChallengeOptions")["clearance_seconds"] = object{"type": "integer", "minimum": 60, "maximum": 86400, "default": 1800}
 	props("CustomRule")["skip"] = object{"type": "array", "items": stringType(), "description": "Explicit targets: custom_rules (remaining rules), rate_limits, managed, rule:<id>, rate:<id>. Protocol and resource limits always apply."}
-	props("CustomRule")["expression"] = object{"type": "string", "maxLength": 4096}
+	for _, name := range []string{"CustomRule", "RateLimitPolicy", "ManagedOverride"} {
+		props(name)["expression"] = object{"type": "string", "maxLength": 4096, "description": "CEL predicate, ANDed with the site scope. Available variables: site.id (resolved by routing), request metadata, and client.ip."}
+	}
 	props("RoutePolicy")["body_mode"] = object{"type": "string", "enum": []string{"inspect", "stream"}, "default": "inspect"}
 	props("RoutePolicy")["max_body_bytes"] = object{"type": "integer", "minimum": 1, "description": "inspect defaults to 8388608 bytes; stream requires an explicit value; bounded by configured node budget."}
 	props("RoutePolicy")["max_duration_seconds"] = object{"type": "integer", "minimum": 0, "maximum": 86400, "description": "A positive value is mandatory for stream routes."}
@@ -90,7 +98,7 @@ func main() {
 	errSchema := named("Error", object{"error": stringType()}, "error")
 	createUser := named("CreateUser", object{"username": stringType(), "password": password, "role": props("User")["role"]}, "username", "password", "role")
 	enrollment := named("Enrollment", object{"user": ref("User"), "totp_secret": stringType(), "otpauth_url": stringType(), "recovery_codes": array(stringType())}, "user", "totp_secret", "otpauth_url", "recovery_codes")
-	evaluate := named("EvaluateRequest", object{"expression": object{"type": "string", "maxLength": 4096}, "sample": object{"type": "object", "additionalProperties": true}}, "expression")
+	evaluate := named("EvaluateRequest", object{"scope": ref("Scope"), "expression": object{"type": "string", "maxLength": 4096}, "sample": object{"type": "object", "additionalProperties": true}}, "expression")
 	evaluation := named("EvaluateResponse", object{"valid": object{"type": "boolean"}, "matches": object{"type": "boolean"}}, "valid", "matches")
 	overview := named("Overview", object{"stats": object{"type": "object", "additionalProperties": numberType()}, "revision": numberType(), "crs_version": stringType(), "development": object{"type": "boolean"}, "upstreams": array(object{"type": "object", "properties": object{"site_id": stringType(), "url": stringType(), "healthy": object{"type": "boolean"}, "health_path": stringType()}}), "certificates": array(ref("Status"))}, "stats", "revision", "crs_version", "upstreams", "certificates")
 	backupRequest := named("BackupRequest", object{"password": password}, "password")
@@ -165,7 +173,7 @@ func main() {
 	add("/backups", "post", "Create a consistent database snapshot and encrypted certificate backup.", "admin", backupRequest, backupInfo, "201")
 	add("/backups/{name}", "get", "Download an encrypted backup; original master.key remains separate.", "admin", nil, nil, "200")
 	add("/openapi.json", "get", "Download this contract.", "viewer", nil, object{"type": "object"}, "200")
-	spec := object{"openapi": "3.1.0", "info": object{"title": "WAF Administration API", "version": "0.1.0", "description": "All paths are relative to /api/v1 on the dedicated administration domain. Mutations require the session cookie, X-CSRF-Token and exact Origin. Body limit: 2 MiB. Site/rule resources are edited together through the versioned configuration draft. Development mode uses the waf_session_dev cookie on loopback HTTP."}, "servers": []any{object{"url": "/api/v1"}}, "paths": paths, "components": object{"schemas": schemas, "securitySchemes": object{"session": object{"type": "apiKey", "in": "cookie", "name": "__Host-waf_session"}, "csrf": object{"type": "apiKey", "in": "header", "name": "X-CSRF-Token"}}}}
+	spec := object{"openapi": "3.1.0", "info": object{"title": "WAF Administration API", "version": "0.1.0", "description": "All paths are relative to /api/v1 on the dedicated administration domain. Mutations require the session cookie, X-CSRF-Token and exact Origin. Body limit: 2 MiB. Sites and global security policies are edited together through the versioned configuration draft. Development mode uses the waf_session_dev cookie on loopback HTTP."}, "servers": []any{object{"url": "/api/v1"}}, "paths": paths, "components": object{"schemas": schemas, "securitySchemes": object{"session": object{"type": "apiKey", "in": "cookie", "name": "__Host-waf_session"}, "csrf": object{"type": "apiKey", "in": "header", "name": "X-CSRF-Token"}}}}
 	raw, err := json.MarshalIndent(spec, "", "  ")
 	if err != nil {
 		panic(err)

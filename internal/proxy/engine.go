@@ -503,7 +503,7 @@ func (e *Engine) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	r = r.Clone(ctx)
 	r.Header.Del("X-WAF-Inspection")
-	data := policy.RequestData(r, event.ClientIP)
+	data := policy.RequestData(r, event.ClientIP, cfg.ID)
 	skip := map[string]bool{}
 	for _, rule := range site.policy.Rules {
 		rc := rule.Config
@@ -567,6 +567,15 @@ func (e *Engine) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	managed := site.policy.ManagedDefault
+	if !skip["managed"] {
+		var err error
+		managed, err = site.policy.SelectManaged(ctx, data)
+		if err != nil {
+			deny(503, "error", "managed_policy_execution_failed")
+			return
+		}
+	}
 	var tx types.Transaction
 	var body *spool
 	var releaseBudget func()
@@ -587,6 +596,7 @@ func (e *Engine) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 						continue
 					}
 					if len(event.MatchedRuleIDs) == 0 {
+						event.ManagedPolicyID = managed.ID
 						event.RuleID = strconv.Itoa(id)
 						event.Message = policy.Description(id)
 					}
@@ -610,8 +620,8 @@ func (e *Engine) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 		})
 	}
 	defer finishInspection()
-	if cfg.Managed.Mode != "off" && !skip["managed"] {
-		tx = site.policy.Managed[policy.Profile(route)].NewTransaction()
+	if managed.Config.Mode != "off" && !skip["managed"] {
+		tx = managed.Profiles[policy.Profile(route)].NewTransaction()
 		tx.ProcessConnection(event.ClientIP, 0, "", 0)
 		tx.ProcessURI(r.URL.RequestURI(), r.Method, r.Proto)
 		tx.SetServerName(host)
@@ -694,7 +704,7 @@ func (e *Engine) ServeHTTP(raw http.ResponseWriter, r *http.Request) {
 	if tx != nil {
 		it, err := tx.ProcessRequestBody()
 		if err != nil {
-			if cfg.Managed.Mode == "block" {
+			if managed.Config.Mode == "block" {
 				deny(503, "error", "managed_inspection_failed")
 				return
 			}
@@ -817,13 +827,26 @@ func validWebSocket(r *http.Request, cfg config.Site) bool {
 	return false
 }
 
-func (e *Engine) ValidateExpression(source string, sample map[string]any) (bool, error) {
+func (e *Engine) ValidateExpression(source string, scope config.Scope, sample map[string]any) (bool, error) {
 	p, err := policy.CompileExpression(source)
 	if err != nil {
 		return false, err
 	}
+	if err := scope.NormalizeAndValidate(nil); err != nil {
+		return false, err
+	}
 	if sample == nil {
 		return true, nil
+	}
+	if scope.Mode == "sites" {
+		site, _ := sample["site"].(map[string]any)
+		id, _ := site["id"].(string)
+		if id == "" {
+			return false, fmt.Errorf("sample.site.id is required for a sites scope")
+		}
+		if !scope.Matches(id) {
+			return false, nil
+		}
 	}
 	return p.Eval(context.Background(), sample)
 }

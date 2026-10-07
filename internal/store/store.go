@@ -62,23 +62,24 @@ type Session struct {
 	Expires time.Time
 }
 type Event struct {
-	ID             int64  `json:"id"`
-	Time           string `json:"time"`
-	SiteID         string `json:"site_id"`
-	RequestID      string `json:"request_id"`
-	ClientIP       string `json:"client_ip"`
-	Method         string `json:"method"`
-	Path           string `json:"path"`
-	Status         int    `json:"status"`
-	Action         string `json:"action"`
-	ChallengeMode  string `json:"challenge_mode,omitempty"`
-	RuleID         string `json:"rule_id,omitempty"`
-	Message        string `json:"message,omitempty"`
-	DurationMS     int64  `json:"duration_ms"`
-	Bytes          int64  `json:"bytes"`
-	Inspection     string `json:"inspection"`
-	Revision       int64  `json:"revision"`
-	MatchedRuleIDs []int  `json:"matched_rule_ids,omitempty"`
+	ID              int64  `json:"id"`
+	Time            string `json:"time"`
+	SiteID          string `json:"site_id"`
+	RequestID       string `json:"request_id"`
+	ClientIP        string `json:"client_ip"`
+	Method          string `json:"method"`
+	Path            string `json:"path"`
+	Status          int    `json:"status"`
+	Action          string `json:"action"`
+	ChallengeMode   string `json:"challenge_mode,omitempty"`
+	RuleID          string `json:"rule_id,omitempty"`
+	ManagedPolicyID string `json:"managed_policy_id,omitempty"`
+	Message         string `json:"message,omitempty"`
+	DurationMS      int64  `json:"duration_ms"`
+	Bytes           int64  `json:"bytes"`
+	Inspection      string `json:"inspection"`
+	Revision        int64  `json:"revision"`
+	MatchedRuleIDs  []int  `json:"matched_rule_ids,omitempty"`
 }
 type Audit struct {
 	ID     int64  `json:"id"`
@@ -168,9 +169,14 @@ func Open(boot config.Bootstrap) (*Store, error) {
 		s.Close()
 		return nil, e
 	}
-	if _, e = s.DB.Exec(`INSERT OR IGNORE INTO draft VALUES(1,0,1,'{"sites":[]}')`); e != nil {
+	initial, _ := json.Marshal(config.DefaultBundle())
+	if _, e = s.DB.Exec(`INSERT OR IGNORE INTO draft VALUES(1,0,1,?)`, string(initial)); e != nil {
 		s.Close()
 		return nil, e
+	}
+	if _, e = s.Draft(); e != nil {
+		s.Close()
+		return nil, fmt.Errorf("cannot load saved draft: %w", e)
 	}
 	s.wg.Add(1)
 	go s.eventWorker()
@@ -197,7 +203,7 @@ func (s *Store) Active() (Revision, error) {
 		return Revision{}, e
 	}
 	if id == 0 {
-		return Revision{Bundle: config.Bundle{Sites: []config.Site{}}}, nil
+		return Revision{Bundle: config.DefaultBundle()}, nil
 	}
 	return s.Revision(id)
 }

@@ -26,7 +26,7 @@ import (
 type sink struct{}
 
 func (sink) Record(store.Event) {}
-func testEngine(t *testing.T, upstream string, edit func(*config.Site)) (*Engine, *httptest.Server) {
+func testEngine(t *testing.T, upstream string, edit func(*config.Site, *config.Security)) (*Engine, *httptest.Server) {
 	t.Helper()
 	boot := config.DefaultBootstrap()
 	boot.DataDir = t.TempDir()
@@ -35,18 +35,19 @@ func testEngine(t *testing.T, upstream string, edit func(*config.Site)) (*Engine
 	boot.HTTPSListen = ""
 	boot.Development = true
 	s := config.DefaultSite()
+	security := config.DefaultSecurity()
 	s.ID = "test"
 	s.Name = "Test"
 	s.Domains = []string{"site.example.com"}
 	s.HTTPS = false
 	s.RedirectHTTP = false
 	s.Upstreams = []config.Upstream{{URL: upstream, Weight: 1}}
-	s.Managed.Mode = "block"
+	security.Managed.Default.Mode = "block"
 	if edit != nil {
-		edit(&s)
+		edit(&s, &security)
 	}
 	e := New(boot, bytes.Repeat([]byte{1}, 32), sink{}, nil)
-	snapshot, err := e.Compile(config.Bundle{Sites: []config.Site{s}})
+	snapshot, err := e.Compile(config.Bundle{Sites: []config.Site{s}, Security: security})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,8 +80,8 @@ func TestManagedAndCustomRules(t *testing.T) {
 		io.WriteString(w, "origin")
 	}))
 	defer origin.Close()
-	_, srv := testEngine(t, origin.URL, func(s *config.Site) {
-		s.Rules = []config.CustomRule{{ID: "private", Enabled: true, Expression: `request.path.startsWith("/private")`, Action: "block"}}
+	_, srv := testEngine(t, origin.URL, func(s *config.Site, security *config.Security) {
+		security.CustomRules = []config.CustomRule{{ID: "private", Enabled: true, Expression: `request.path.startsWith("/private")`, Action: "block"}}
 	})
 	for _, tc := range []struct {
 		path string
@@ -132,7 +133,7 @@ func TestStreamingUpload(t *testing.T) {
 		io.WriteString(w, "ok")
 	}))
 	defer origin.Close()
-	_, srv := testEngine(t, origin.URL, func(s *config.Site) {
+	_, srv := testEngine(t, origin.URL, func(s *config.Site, security *config.Security) {
 		s.Routes = []config.RoutePolicy{{PathPrefix: "/upload", BodyMode: "stream", MaxBodyBytes: 1024, IdleTimeoutSeconds: 5, MaxDurationSeconds: 10, MaxConcurrent: 4}}
 	})
 	reader, writer := io.Pipe()
@@ -216,7 +217,7 @@ func TestWebSocketAndReload(t *testing.T) {
 func TestBodyLimitAndEncoding(t *testing.T) {
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.Copy(w, r.Body) }))
 	defer origin.Close()
-	_, srv := testEngine(t, origin.URL, func(s *config.Site) {
+	_, srv := testEngine(t, origin.URL, func(s *config.Site, security *config.Security) {
 		s.Routes = []config.RoutePolicy{{PathPrefix: "/", BodyMode: "inspect", MaxBodyBytes: 16, IdleTimeoutSeconds: 5, MaxConcurrent: 4}}
 	})
 	resp := request(t, srv, "POST", "/", strings.NewReader(`{"value":"too much content"}`))
@@ -271,7 +272,7 @@ func TestUnknownLengthStreamLimit(t *testing.T) {
 		forwarded <- n
 	}))
 	defer origin.Close()
-	_, srv := testEngine(t, origin.URL, func(s *config.Site) {
+	_, srv := testEngine(t, origin.URL, func(s *config.Site, security *config.Security) {
 		s.Routes = []config.RoutePolicy{{PathPrefix: "/upload", BodyMode: "stream", MaxBodyBytes: 1024, IdleTimeoutSeconds: 5, MaxDurationSeconds: 10, MaxConcurrent: 4}}
 	})
 	// Hide the known length to exercise chunked / HTTP/2 streaming enforcement.
@@ -366,8 +367,8 @@ func TestDrainAndProxyLoop(t *testing.T) {
 func TestManagedExceptionScopeAndObserve(t *testing.T) {
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }))
 	defer origin.Close()
-	_, srv := testEngine(t, origin.URL, func(s *config.Site) {
-		s.Managed.Exclusions = []config.Exclusion{{RuleID: 913100, PathPrefix: "/trusted", Target: "REQUEST_HEADERS:User-Agent"}}
+	_, srv := testEngine(t, origin.URL, func(s *config.Site, security *config.Security) {
+		security.Managed.Default.Exclusions = []config.Exclusion{{RuleID: 913100, PathPrefix: "/trusted", Target: "REQUEST_HEADERS:User-Agent"}}
 	})
 	for _, tc := range []struct {
 		path   string
@@ -385,7 +386,7 @@ func TestManagedExceptionScopeAndObserve(t *testing.T) {
 			t.Fatalf("%s status %d", tc.path, resp.StatusCode)
 		}
 	}
-	_, observing := testEngine(t, origin.URL, func(s *config.Site) { s.Managed.Mode = "observe" })
+	_, observing := testEngine(t, origin.URL, func(s *config.Site, security *config.Security) { security.Managed.Default.Mode = "observe" })
 	resp := request(t, observing, "GET", "/?q="+url.QueryEscape("<script>alert(1)</script>"), nil)
 	resp.Body.Close()
 	if resp.StatusCode != 204 {
@@ -398,9 +399,9 @@ func TestSecurityActionExecution(t *testing.T) {
 	defer origin.Close()
 	for _, action := range []string{"block", "log", "managed_challenge", "non_interactive_challenge", "interactive_challenge"} {
 		t.Run(action, func(t *testing.T) {
-			_, srv := testEngine(t, origin.URL, func(s *config.Site) {
-				s.Managed.Mode = "off"
-				s.Rules = []config.CustomRule{{ID: "rule", Enabled: true, Expression: "true", Action: action}}
+			_, srv := testEngine(t, origin.URL, func(s *config.Site, security *config.Security) {
+				security.Managed.Default.Mode = "off"
+				security.CustomRules = []config.CustomRule{{ID: "rule", Enabled: true, Expression: "true", Action: action}}
 			})
 			resp := request(t, srv, "GET", "/protected", nil)
 			defer resp.Body.Close()
@@ -431,8 +432,8 @@ func TestSecurityActionExecution(t *testing.T) {
 func TestSkipPhasesAndResourceLimits(t *testing.T) {
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "origin") }))
 	defer origin.Close()
-	_, srv := testEngine(t, origin.URL, func(s *config.Site) {
-		s.Rules = []config.CustomRule{
+	_, srv := testEngine(t, origin.URL, func(s *config.Site, security *config.Security) {
+		security.CustomRules = []config.CustomRule{
 			{ID: "skip-custom", Enabled: true, Priority: 1, Expression: `request.path == "/custom"`, Action: "skip", Skip: []string{"custom_rules"}},
 			{ID: "skip-one", Enabled: true, Priority: 1, Expression: `request.path == "/one"`, Action: "skip", Skip: []string{"rule:blocked"}},
 			{ID: "skip-rates", Enabled: true, Priority: 1, Expression: `request.path == "/rates"`, Action: "skip", Skip: []string{"rate_limits"}},
@@ -441,7 +442,7 @@ func TestSkipPhasesAndResourceLimits(t *testing.T) {
 			{ID: "skip-bypass", Enabled: true, Priority: 1, Expression: `request.path == "/bypass"`, Action: "skip", Skip: []string{"custom_rules", "rate_limits", "managed"}},
 			{ID: "blocked", Enabled: true, Priority: 2, Expression: `request.path in ["/custom", "/one", "/blocked"]`, Action: "block"},
 		}
-		s.RateLimits = []config.RateLimitPolicy{{ID: "limit", Enabled: true, Expression: `request.path in ["/rates", "/rate", "/limited"]`, Key: "ip_path", RequestsPerSecond: 0.001, Burst: 1}}
+		security.RateLimits = []config.RateLimitPolicy{{ID: "limit", Enabled: true, Expression: `request.path in ["/rates", "/rate", "/limited"]`, Key: "ip_path", RequestsPerSecond: 0.001, Burst: 1}}
 		s.Routes[0].MaxBodyBytes = 1024
 	})
 	for _, path := range []string{"/custom", "/one", "/rates", "/rate"} {

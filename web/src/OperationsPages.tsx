@@ -34,14 +34,17 @@ import type {
   Revision,
   SecurityEvent,
   Site,
+  Security,
   User,
 } from "./types";
 const { Text, Paragraph } = Typography;
 export function OverviewPage({
   sites,
+  security,
   refresh,
 }: {
   sites: Site[];
+  security: Security;
   refresh: number;
 }) {
   const [data, setData] = useState<Overview>();
@@ -65,7 +68,12 @@ export function OverviewPage({
   const blocked =
     (stats.block || 0) + (stats.rate_limit || 0) + (stats.resource_limit || 0);
   const active = sites.filter((s) => s.enabled);
-  const observe = active.filter((s) => s.managed.mode === "observe");
+  const defaultMode = { observe: "观察", block: "拦截", off: "关闭" }[
+    security.managed.default.mode
+  ];
+  const conditional = security.managed.overrides.filter(
+    (o) => o.enabled,
+  ).length;
   return (
     <Space orientation="vertical" size={16} className="full-width">
       {error && <Alert type="error" title={error} />}
@@ -101,7 +109,7 @@ export function OverviewPage({
           {
             title: "启用站点",
             value: active.length,
-            note: `${observe.length} 个站点处于观察模式`,
+            note: `托管全局默认：${defaultMode} · ${conditional} 条条件覆盖`,
           },
         ].map((x) => (
           <Col xs={12} xl={6} key={x.title}>
@@ -112,12 +120,12 @@ export function OverviewPage({
           </Col>
         ))}
       </Row>
-      {observe.length > 0 && (
+      {(security.managed.default.mode !== "block" || conditional > 0) && (
         <Alert
           showIcon
           type="warning"
-          title={`${observe.length} 个站点处于观察模式`}
-          description="托管规则只记录命中，不拦截请求。确认无误报后，可切换为拦截模式并发布。"
+          title={`托管全局默认：${defaultMode}，已启用 ${conditional} 条条件覆盖`}
+          description="每个请求采用首条匹配的覆盖策略，否则使用全局默认。观察模式只记录命中；可在安全规则页调整并发布。"
         />
       )}
       {((stats.log_dropped || 0) > 0 || (stats.log_write_errors || 0) > 0) && (
@@ -530,7 +538,10 @@ export function EventsPage({
         onCancel={() => setDetail(null)}
         width={760}
         footer={
-          detail && editable && Number(detail.rule_id) >= 900000 ? (
+          detail &&
+          editable &&
+          detail.managed_policy_id &&
+          detail.matched_rule_ids?.includes(Number(detail.rule_id)) ? (
             <Space>
               <Button onClick={() => setDetail(null)}>关闭</Button>
               <Button
@@ -563,6 +574,11 @@ export function EventsPage({
                   span: 2,
                 },
                 { key: "site", label: "站点", children: detail.site_id },
+                {
+                  key: "managed_policy",
+                  label: "托管策略",
+                  children: detail.managed_policy_id || "—",
+                },
                 {
                   key: "revision",
                   label: "配置版本",
@@ -635,7 +651,7 @@ export function EventsPage({
           type="warning"
           showIcon
           title="检查例外范围后再发布"
-          description="例外按路径前缀匹配，填写参数可缩小跳过范围。"
+          description="例外仅应用于此事件的网站及对应托管策略，按路径前缀匹配；填写参数可进一步缩小跳过范围。"
         />
         <Form form={form} layout="vertical" className="form-top">
           <Form.Item name="path_prefix" label="路径前缀">
